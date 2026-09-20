@@ -55,6 +55,16 @@ const server = createServer((socket) => {
                     }) + "\n"
                 );
             }
+
+            if (message.type === "HEARTBEAT") {
+                workers.set(message.workerId, {
+                    socket: socket,
+                    status: "HEALTHY",
+                    lastSeen: message.currentTime
+                });
+
+                console.log(`Got Heartbeat from: ${message.workerId}`);
+            }
         }
     });
 

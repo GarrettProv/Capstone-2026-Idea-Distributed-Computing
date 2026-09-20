@@ -17,7 +17,25 @@ const socket = createConnection(
 
         socket.write(
             JSON.stringify(registerMessage) + "\n"
-        ); //Send the register message
+        );
+
+        const FIVE_MINUTES_IN_MS: number = .5 * 60 * 1000;
+
+        function sendHeartbeat(): void {
+            const currentTimestamp: string = new Date().toISOString();
+            const heartbeatMessage = {
+                type: "HEARTBEAT",
+                workerId: workerId,
+                currentTime: currentTimestamp
+            };
+
+            socket.write(
+                JSON.stringify(heartbeatMessage) + "\n"
+            );
+        }
+        sendHeartbeat();
+
+        setInterval(sendHeartbeat, FIVE_MINUTES_IN_MS);
     }
 );
 

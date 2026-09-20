@@ -6,7 +6,8 @@
   "main": "src/coordinator.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/coordinator.js"
+    "coordinator": "npx tsx src/coordinator.ts",
+    "worker": "npx tsx src/worker.ts"
   },
   "dependencies": {
     "node": "^26.8.2",
