@@ -2,7 +2,7 @@ import { createServer, type Socket } from "node:net";
 
 type WorkerInfo = {
     socket: Socket;
-    status: "HEALTHY";
+    status: "HEALTHY" | "UNHEALTHY";
     lastSeen: number;
 };
 
@@ -48,6 +48,13 @@ const server = createServer((socket) => {
                     console.log(`- ${workerId}`);
                 } // Logs all nodes connected
 
+                for (const [workerId, workerInfo] of workers.entries()) {
+                    console.log(
+                        `Worker ${workerId} is ${workerInfo.status} and last seen at ${new Date(workerInfo.lastSeen).toISOString()}`
+                    );
+                }
+
+
                 socket.write(
                     JSON.stringify({
                         type: "REGISTERED",
@@ -57,15 +64,23 @@ const server = createServer((socket) => {
             }
 
             if (message.type === "HEARTBEAT") {
-                workers.set(message.workerId, {
-                    socket: socket,
-                    status: "HEALTHY",
-                    lastSeen: message.currentTime
-                });
+                const worker = workers.get(message.workerId);
 
-                console.log(`Got Heartbeat from: ${message.workerId}`);
+                if (worker?.socket === socket) {
+                    worker.lastSeen = Date.now();
+                    worker.status = "HEALTHY";
+
+                    console.log(`Got Heartbeat from: ${message.workerId}`);
+                }
             }
+
+            if(message.type === "DISCONNECT") {
+
+            }
+
+
         }
+
     });
 
     socket.on("close", () => {
@@ -74,7 +89,6 @@ const server = createServer((socket) => {
         if (registeredWorkerId !== null) {
             const worker = workers.get(registeredWorkerId);
 
-            // Make sure this is still the same connection
             if (worker?.socket === socket) {
                 workers.delete(registeredWorkerId);
 
@@ -89,5 +103,26 @@ const server = createServer((socket) => {
 });
 
 server.listen(3000, "127.0.0.1", () => {
-    console.log("Atlas coordinator listening on port 3000");
+    console.log("Coordinator listening on port 3000");
+
+    const HEARTBEAT_TIMEOUT_MS = 10_000;
+
+    setInterval(() => {
+        const now = Date.now();
+
+        for (const [workerId, worker] of workers.entries()) {
+            if (now - worker.lastSeen > HEARTBEAT_TIMEOUT_MS) {
+                if(worker.status == "HEALTHY"){
+                    worker.status = "UNHEALTHY";
+                    console.log(`No Heartbeat recvied from healthy Node: ${workerId}`);
+                }
+                else if(worker.status == "UNHEALTHY"){
+                    console.log(`Worker timed out: ${workerId}`);
+
+                    workers.delete(workerId);
+                    worker.socket.destroy();
+                }
+            }
+        }
+    }, 10_000);
 });

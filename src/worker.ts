@@ -19,7 +19,7 @@ const socket = createConnection(
             JSON.stringify(registerMessage) + "\n"
         );
 
-        const FIVE_MINUTES_IN_MS: number = .5 * 60 * 1000;
+        const HEARTBEAT_INTERVAL_MS: number = 30 * 60 * 1000;
 
         function sendHeartbeat(): void {
             const currentTimestamp: string = new Date().toISOString();
@@ -29,13 +29,14 @@ const socket = createConnection(
                 currentTime: currentTimestamp
             };
 
+            console.log("Sent Heartbeat Message");
             socket.write(
                 JSON.stringify(heartbeatMessage) + "\n"
             );
         }
         sendHeartbeat();
 
-        setInterval(sendHeartbeat, FIVE_MINUTES_IN_MS);
+        setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
     }
 );
 
@@ -47,6 +48,7 @@ socket.on("data", (data) => { //Get any data from coordinator
 });
 
 socket.on("close", () => {
+    
     console.log("Disconnected from coordinator");
 });
 
