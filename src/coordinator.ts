@@ -1,12 +1,46 @@
 import { createServer, type Socket } from "node:net";
+import { writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 
 type WorkerInfo = {
     socket: Socket;
     status: "HEALTHY" | "UNHEALTHY";
+    numOfJobs: number;
     lastSeen: number;
+    jobsQueueDebug?: string[]; // Optional debug information about the jobs in the queue
+    currentJobId?: string | null;
 };
 
 const workers = new Map<string, WorkerInfo>();
+const jobs = new Map<string, Socket>(); // jobId -> developer socket
+const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
+
+async function writeWorkerSnapshot(): Promise<void> {
+    const generatedAt = new Date();
+    const lines = [
+        `Worker state snapshot at ${generatedAt.toISOString()}`,
+        `Workers: ${workers.size}`,
+        ""
+    ];
+
+    for (const [workerId, worker] of workers.entries()) {
+        lines.push(
+            `ID: ${workerId}`,
+            `Status: ${worker.status}`,
+            `Current jobs: ${worker.numOfJobs}`,
+            `Last heartbeat: ${new Date(worker.lastSeen).toISOString()}`,
+            `Jobs in queue: ${worker.jobsQueueDebug?.join(", ") || "None"}`,
+            `Current job ID: ${worker.currentJobId || "None"}`,
+            ""
+        );
+    }
+
+    try {
+        await writeFile(WORKER_STATE_FILE, lines.join("\n"), "utf8");
+    } catch (error) {
+        console.error("Could not write worker state snapshot:", error);
+    }
+}
 
 const server = createServer((socket) => {
     console.log("New connection");
@@ -37,7 +71,8 @@ const server = createServer((socket) => {
                 workers.set(message.workerId, {
                     socket: socket,
                     status: "HEALTHY",
-                    lastSeen: Date.now()
+                    lastSeen: Date.now(),
+                    numOfJobs: 0
                 });
 
                 console.log(`Registered worker: ${message.workerId}`);
@@ -69,15 +104,61 @@ const server = createServer((socket) => {
                 if (worker?.socket === socket) {
                     worker.lastSeen = Date.now();
                     worker.status = "HEALTHY";
+                    worker.numOfJobs = message.currentAmountOfJobs;
+                    worker.jobsQueueDebug = message.jobsQueueDebug;
+                    worker.currentJobId = message.currentJobId; // Store the current job ID if provided
 
                     console.log(`Got Heartbeat from: ${message.workerId}`);
                 }
             }
 
+            //NOT FINISHED YET
             if(message.type === "DISCONNECT") {
 
             }
 
+            if (message.type === "SUBMIT_JOB") {
+               const workerEntry = [...workers.entries()]
+                    .filter(([workerId, worker]) =>
+                        worker.status === "HEALTHY" && workerId !== "Dev-Node"
+                    )
+                    .sort(([, workerA], [, workerB]) =>
+                        workerA.numOfJobs - workerB.numOfJobs
+                    )[0]; // Choose the healthy worker with the fewest jobs
+
+
+                if (!workerEntry) {
+                    socket.write(JSON.stringify({
+                        type: "JOB_ERROR",
+                        jobId: message.jobId,
+                        error: "No healthy workers available"
+                    }) + "\n");
+                    continue;
+                }
+
+                const [workerId, worker] = workerEntry;
+                worker.numOfJobs++;
+                jobs.set(message.jobId, socket);
+
+                worker.socket.write(JSON.stringify({
+                    type: "RUN_JOB",
+                    jobId: message.jobId,
+                    kind: message.kind,
+                    input: message.input
+                }) + "\n");
+
+                console.log(`Assigned ${message.jobId} to ${workerId}`);
+            }
+
+            if(message.type === "JOB_RESULT") {
+                console.log(`Received result for ${message.jobId}: ${message.result}`);
+                const developerSocket = jobs.get(message.jobId);
+
+                if (developerSocket) {
+                    developerSocket.write(JSON.stringify(message) + "\n");
+                    jobs.delete(message.jobId);
+                }
+            }
 
         }
 
@@ -105,6 +186,11 @@ const server = createServer((socket) => {
 server.listen(3000, "127.0.0.1", () => {
     console.log("Coordinator listening on port 3000");
 
+    void writeWorkerSnapshot();
+    setInterval(() => {
+        void writeWorkerSnapshot();
+    }, 3_000);
+
     const HEARTBEAT_TIMEOUT_MS = 10_000;
 
     setInterval(() => {
@@ -112,17 +198,27 @@ server.listen(3000, "127.0.0.1", () => {
 
         for (const [workerId, worker] of workers.entries()) {
             if (now - worker.lastSeen > HEARTBEAT_TIMEOUT_MS) {
-                if(worker.status == "HEALTHY"){
+                if(worker.status == "HEALTHY" && workerId !== "Dev-Node"){
                     worker.status = "UNHEALTHY";
                     console.log(`No Heartbeat recvied from healthy Node: ${workerId}`);
                 }
                 else if(worker.status == "UNHEALTHY"){
                     console.log(`Worker timed out: ${workerId}`);
-
+                    //Send message to worker before disconnect
+                    worker.socket.write(
+                        JSON.stringify({
+                            type: "DISCONNECT",
+                            reason: "No heartbeat received. Disconnecting."
+                        }) + "\n"
+                    );
+                    
                     workers.delete(workerId);
                     worker.socket.destroy();
                 }
             }
         }
     }, 10_000);
+
+    
+
 });

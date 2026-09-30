@@ -7,7 +7,9 @@
   "type": "commonjs",
   "scripts": {
     "coordinator": "npx tsx src/coordinator.ts",
-    "worker": "npx tsx src/worker.ts"
+    "worker": "npx tsx src/worker.ts",
+    "developer": "npx tsx src/developer.ts",
+    "start-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-cluster.ps1"
   },
   "dependencies": {
     "node": "^26.8.2",
