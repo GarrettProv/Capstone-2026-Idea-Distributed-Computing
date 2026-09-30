@@ -154,6 +154,13 @@ const server = createServer((socket) => {
                 console.log(`Received result for ${message.jobId}: ${message.result}`);
                 const developerSocket = jobs.get(message.jobId);
 
+                const worker = workers.get(message.workerId);
+                if (worker) {
+                    worker.lastSeen = Date.now();
+                    worker.currentJobId = null;
+                    worker.numOfJobs = Math.max(0, worker.numOfJobs - 1);
+                }
+
                 if (developerSocket) {
                     developerSocket.write(JSON.stringify(message) + "\n");
                     jobs.delete(message.jobId);
