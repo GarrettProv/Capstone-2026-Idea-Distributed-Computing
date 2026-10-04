@@ -11,8 +11,23 @@ type WorkerInfo = {
     currentJobId?: string | null;
 };
 
+enum JobStatus {
+    QUEUED = "QUEUED",
+    RUNNING = "RUNNING",
+    COMPLETED = "COMPLETED",
+    FAILED = "FAILED"
+}
+
+type JobInfo = {
+    jobId: string;
+    status: JobStatus;
+    assignedWorkerId?: string | null;
+    result?: unknown;
+    developerSocket: Socket; //So i can track who asked for a job
+};
+
 const workers = new Map<string, WorkerInfo>();
-const jobs = new Map<string, Socket>(); // jobId -> developer socket
+const jobs = new Map<string, JobInfo>(); // jobId -> job information
 const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
 
 async function writeWorkerSnapshot(): Promise<void> {
@@ -20,6 +35,11 @@ async function writeWorkerSnapshot(): Promise<void> {
     const lines = [
         `Worker state snapshot at ${generatedAt.toISOString()}`,
         `Workers: ${workers.size}`,
+        `Jobs: ${jobs.size}`,
+        'Jobs Details:',
+        ...Array.from(jobs.entries()).map(([jobId, jobInfo]) => {
+            return `Job ID: ${jobId}, Status: ${jobInfo.status}, Assigned Worker: ${jobInfo.assignedWorkerId || "None"}, Result: ${jobInfo.result ?? "None"}`;
+        }),
         ""
     ];
 
@@ -34,6 +54,8 @@ async function writeWorkerSnapshot(): Promise<void> {
             ""
         );
     }
+
+
 
     try {
         await writeFile(WORKER_STATE_FILE, lines.join("\n"), "utf8");
@@ -138,7 +160,12 @@ const server = createServer((socket) => {
 
                 const [workerId, worker] = workerEntry;
                 worker.numOfJobs++;
-                jobs.set(message.jobId, socket);
+                jobs.set(message.jobId, {
+                    jobId: message.jobId,
+                    status: JobStatus.QUEUED,
+                    assignedWorkerId: workerId,
+                    developerSocket: socket // The socket of whoever asked for the job
+                });
 
                 worker.socket.write(JSON.stringify({
                     type: "RUN_JOB",
@@ -150,9 +177,16 @@ const server = createServer((socket) => {
                 console.log(`Assigned ${message.jobId} to ${workerId}`);
             }
 
+            if(message.type === "STARTING_JOB") {
+                const jobInfo = jobs.get(message.jobId);
+                if (jobInfo) {
+                    jobInfo.status = JobStatus.RUNNING;
+                }
+            }
+
             if(message.type === "JOB_RESULT") {
                 console.log(`Received result for ${message.jobId}: ${message.result}`);
-                const developerSocket = jobs.get(message.jobId);
+                const jobInfo = jobs.get(message.jobId);
 
                 const worker = workers.get(message.workerId);
                 if (worker) {
@@ -161,10 +195,17 @@ const server = createServer((socket) => {
                     worker.numOfJobs = Math.max(0, worker.numOfJobs - 1);
                 }
 
-                if (developerSocket) {
-                    developerSocket.write(JSON.stringify(message) + "\n");
-                    jobs.delete(message.jobId);
-                }
+                if (jobInfo) {
+                    jobInfo.status = JobStatus.COMPLETED;
+                    jobInfo.result = message.result;
+                    jobInfo.developerSocket.write(JSON.stringify({
+                        type: "JOB_RESULT",
+                        jobId: message.jobId,
+                        result: message.result
+                    }) + "\n");
+                }   
+
+                
             }
 
         }

@@ -82,6 +82,14 @@ function startNextJob(): void {
     if (!message) return;
     currentJobId = message.jobId;
 
+    socket.write(JSON.stringify({
+        type: "STARTING_JOB",
+        workerId,
+        jobId: message.jobId
+    }) + "\n");
+
+    console.log(`Starting job: ${message.jobId}`);
+
     const finishJob = (result: unknown): void => {
         const jobResult = {
             type: "JOB_RESULT",
