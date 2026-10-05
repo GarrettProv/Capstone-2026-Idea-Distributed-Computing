@@ -63,6 +63,11 @@ socket.on("data", (data) => { //Get any data from coordinator
             startNextJob();
         }
 
+        if (message.type === "HEARTBEAT_CONTROL") {
+            heartbeat = message.action === "start";
+            console.log(`${message.action === "start" ? "Starting" : "Stopping"} heartbeat messages`);
+        }
+
         if (message.type === "DISCONNECT") {
             console.log(`Received disconnect message from coordinator: ${message.reason}`);
             socket.end();

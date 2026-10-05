@@ -7,6 +7,7 @@ type WorkerInfo = {
     status: "HEALTHY" | "UNHEALTHY";
     numOfJobs: number;
     lastSeen: number;
+    unhealthySince?: number; 
     jobsQueueDebug?: string[]; // Optional debug information about the jobs in the queue
     currentJobId?: string | null;
 };
@@ -22,6 +23,8 @@ type JobInfo = {
     jobId: string;
     status: JobStatus;
     assignedWorkerId?: string | null;
+    kind: string;
+    input: unknown;
     result?: unknown;
     developerSocket: Socket; //So i can track who asked for a job
 };
@@ -139,10 +142,30 @@ const server = createServer((socket) => {
 
             }
 
+            if (message.type === "HEARTBEAT_CONTROL") {
+                const worker = workers.get(message.targetWorkerId);
+
+                if (worker && message.targetWorkerId !== "Dev-Node" &&
+                    (message.action === "start" || worker.status === "HEALTHY")) {
+                    worker.socket.write(JSON.stringify({
+                        type: "HEARTBEAT_CONTROL",
+                        action: message.action
+                    }) + "\n");
+                } else {
+                    socket.write(JSON.stringify({
+                        type: "JOB_ERROR",
+                        error: `Worker not available: ${message.targetWorkerId}`
+                    }) + "\n");
+                }
+            }
+
             if (message.type === "SUBMIT_JOB") {
+               const targetWorkerId = message.input?.targetWorkerId;
                const workerEntry = [...workers.entries()]
                     .filter(([workerId, worker]) =>
-                        worker.status === "HEALTHY" && workerId !== "Dev-Node"
+                        worker.status === "HEALTHY" &&
+                        workerId !== "Dev-Node" &&
+                        (!targetWorkerId || workerId === targetWorkerId)
                     )
                     .sort(([, workerA], [, workerB]) =>
                         workerA.numOfJobs - workerB.numOfJobs
@@ -163,6 +186,8 @@ const server = createServer((socket) => {
                 jobs.set(message.jobId, {
                     jobId: message.jobId,
                     status: JobStatus.QUEUED,
+                    kind: message.kind,
+                    input: message.input,
                     assignedWorkerId: workerId,
                     developerSocket: socket // The socket of whoever asked for the job
                 });
@@ -188,6 +213,11 @@ const server = createServer((socket) => {
                 console.log(`Received result for ${message.jobId}: ${message.result}`);
                 const jobInfo = jobs.get(message.jobId);
 
+                if (!jobInfo || jobInfo.status === JobStatus.COMPLETED) {
+                    console.log(`Ignoring duplicate or unknown result for ${message.jobId}`);
+                    continue;
+                }
+
                 const worker = workers.get(message.workerId);
                 if (worker) {
                     worker.lastSeen = Date.now();
@@ -206,6 +236,51 @@ const server = createServer((socket) => {
                 }   
 
                 
+            }
+
+            if(message.type === "SIMULATE_FAILURE"){
+                const targetWorkerId = message.targetWorkerId;
+                const workerEntry = [...workers.entries()]
+                    .filter(([workerId, worker]) =>
+                        worker.status === "HEALTHY" &&
+                        workerId !== "Dev-Node" &&
+                        (!targetWorkerId || workerId === targetWorkerId)
+                    )
+                    .sort(([, workerA], [, workerB]) =>
+                        workerA.numOfJobs - workerB.numOfJobs
+                    )[0]; // Choose the healthy worker with the fewest jobs
+
+
+                if (workerEntry) {
+                    const [workerId, worker] = workerEntry;
+                    worker.numOfJobs++;
+                    jobs.set(message.jobId, {
+                        jobId: message.jobId,
+                        status: JobStatus.QUEUED,
+                        kind: message.kind,
+                        input: message.input,
+                        assignedWorkerId: workerId,
+                        developerSocket: socket
+                    });
+
+                    worker.socket.write(JSON.stringify({
+                        type: "RUN_JOB",
+                        jobId: message.jobId,
+                        kind: message.kind,
+                        input: message.input
+                    }) + "\n");
+
+                    console.log(`Assigned ${message.jobId} to ${workerId}`);
+
+                    //Stopping Heartbeat after a short delay to ensure the job has started
+                    setTimeout(() => {
+                        worker.socket.write(JSON.stringify({
+                            type: "HEARTBEAT_CONTROL",
+                            action: "stop"
+                        }) + "\n");
+                    }, 1000); // Delay of 1 second
+                    
+                }
             }
 
         }
@@ -239,7 +314,7 @@ server.listen(3000, "127.0.0.1", () => {
         void writeWorkerSnapshot();
     }, 3_000);
 
-    const HEARTBEAT_TIMEOUT_MS = 10_000;
+    const HEARTBEAT_TIMEOUT_MS = 30_000;
 
     setInterval(() => {
         const now = Date.now();
@@ -248,20 +323,51 @@ server.listen(3000, "127.0.0.1", () => {
             if (now - worker.lastSeen > HEARTBEAT_TIMEOUT_MS) {
                 if(worker.status == "HEALTHY" && workerId !== "Dev-Node"){
                     worker.status = "UNHEALTHY";
+                    worker.unhealthySince = now;
                     console.log(`No Heartbeat recvied from healthy Node: ${workerId}`);
                 }
                 else if(worker.status == "UNHEALTHY"){
                     console.log(`Worker timed out: ${workerId}`);
-                    //Send message to worker before disconnect
-                    worker.socket.write(
-                        JSON.stringify({
-                            type: "DISCONNECT",
-                            reason: "No heartbeat received. Disconnecting."
-                        }) + "\n"
-                    );
-                    
-                    workers.delete(workerId);
-                    worker.socket.destroy();
+                    if(worker.unhealthySince && now - worker.unhealthySince > HEARTBEAT_TIMEOUT_MS){
+                        worker.socket.write(
+                            JSON.stringify({
+                                type: "DISCONNECT",
+                                reason: "No heartbeat received. Disconnecting."
+                            }) + "\n"
+                        );
+                        
+                        workers.delete(workerId);
+                        worker.socket.destroy();
+                    }
+                }
+            }
+
+            if(worker.status == "UNHEALTHY" && workerId !== "Dev-Node"){
+                if(worker.numOfJobs > 0){
+                    //Reasign jobs from the unhealthy worker to healthy workers
+                    for(const [jobId, jobInfo] of jobs.entries()){
+                        if(jobInfo.assignedWorkerId === workerId && jobInfo.status !== JobStatus.COMPLETED){
+                            console.log(`Reassigning job ${jobId} from unhealthy worker ${workerId}`);
+                            // Find a healthy worker to reassign the job to
+                            const healthyWorkerEntry = [...workers.entries()]
+                                .filter(([id, w]) => w.status === "HEALTHY" && id !== "Dev-Node")
+                                .sort(([, wA], [, wB]) => wA.numOfJobs - wB.numOfJobs)[0];
+                            
+                            if (healthyWorkerEntry) {
+                                const [healthyWorkerId, healthyWorker] = healthyWorkerEntry;
+                                healthyWorker.numOfJobs++;
+                                jobInfo.assignedWorkerId = healthyWorkerId;
+                                jobInfo.status = JobStatus.QUEUED;
+
+                                healthyWorker.socket.write(JSON.stringify({
+                                    type: "RUN_JOB",
+                                    jobId: jobInfo.jobId,
+                                    kind: jobInfo.kind,
+                                    input: jobInfo.input
+                                }) + "\n");
+                            }
+                        }
+                    }
                 }
             }
         }

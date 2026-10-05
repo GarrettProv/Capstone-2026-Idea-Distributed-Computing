@@ -19,11 +19,11 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
     terminal.prompt();
 
     terminal.on("line", (line) => {
-        const [command, startText, endText, jobLengthDEBUG] = line.trim().split(/\s+/);
+        const [command, input1, input2, input3] = line.trim().split(/\s+/);
 
-        const start = Number(startText);
-        const end = Number(endText);
-        const jobLength = Number(jobLengthDEBUG);
+        const start = Number(input1);
+        const end = Number(input2);
+        const jobLength = Number(input3);
 
         const jobId = `job-${Date.now()}`;
         if(command == "sum"){
@@ -36,19 +36,31 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
 
             console.log(`Submitted ${jobId}: sum ${start} through ${end}`);
         }
+
+        if(command == "simFailure"){
+            const start = 1;
+            const end = 100;
+            const jobLength = 100000;
+            socket.write(JSON.stringify({
+                type: "SIMULATE_FAILURE",
+                jobId: jobId,
+                kind: input2,
+                targetWorkerId: input1,
+                input: { start, end, jobLength }
+            }) + "\n");
+        }
+
         else if(command == "Stop-Heartbeat"){
             socket.write(JSON.stringify({
-                type: "SUBMIT_JOB",
-                jobId,
-                kind: "stop_heartbeat",
-                input: {}
+                type: "HEARTBEAT_CONTROL",
+                action: "stop",
+                targetWorkerId: input1
             }) + "\n");
         } else if(command == "Start-Heartbeat"){
             socket.write(JSON.stringify({
-                type: "SUBMIT_JOB",
-                jobId,
-                kind: "start_heartbeat",
-                input: {}
+                type: "HEARTBEAT_CONTROL",
+                action: "start",
+                targetWorkerId: input1
             }) + "\n");
         }
 
