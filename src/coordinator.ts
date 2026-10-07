@@ -151,12 +151,34 @@ const server = createServer((socket) => {
                         type: "HEARTBEAT_CONTROL",
                         action: message.action
                     }) + "\n");
+                    socket.write(JSON.stringify({
+                        type: "HEARTBEAT_CONTROLLED",
+                        action: message.action,
+                        workerId: message.targetWorkerId
+                    }) + "\n");
                 } else {
                     socket.write(JSON.stringify({
                         type: "JOB_ERROR",
                         error: `Worker not available: ${message.targetWorkerId}`
                     }) + "\n");
                 }
+            }
+
+            if (message.type === "GET_STATUS") {
+                socket.write(JSON.stringify({
+                    type: "CLUSTER_STATUS",
+                    workers: [...workers.entries()].map(([workerId, worker]) => ({
+                        workerId,
+                        status: worker.status,
+                        currentJobs: worker.numOfJobs,
+                        currentJobId: worker.currentJobId ?? null
+                    })),
+                    jobs: [...jobs.values()].map(({ jobId, status, assignedWorkerId }) => ({
+                        jobId,
+                        status,
+                        assignedWorkerId: assignedWorkerId ?? null
+                    }))
+                }) + "\n");
             }
 
             if (message.type === "SUBMIT_JOB") {
