@@ -27,12 +27,16 @@ type JobInfo = {
     kind: string;
     input: unknown;
     result?: unknown;
+    groupJob?: boolean; // Indicates if this job is part of a group job
     developerSocket: Socket; //So i can track who asked for a job
 };
 
 const workers = new Map<string, WorkerInfo>();
 const jobs = new Map<string, JobInfo>(); // jobId -> job information
 const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
+
+// JobId -> {WorkerId -> Offered Canadite}
+let islandExachangeDict: Record<string, Record<string, number>> = {}
 
 async function writeWorkerSnapshot(): Promise<void> {
     const generatedAt = new Date();
@@ -227,47 +231,103 @@ const server = createServer((socket) => {
             }
 
             if (message.type === "SUBMIT_ISLAND_JOB") {
-               const targetIslandId = message.input?.targetWorkerId;
-               const islandEntry = [...workers.entries()]
-                    .filter(([workerId, worker]) =>
-                        worker.status === "HEALTHY" &&
-                        workerId !== "Dev-Node" &&
-                        worker.type === "island" &&
-                        (!targetIslandId || workerId === targetIslandId)
-                    )
-                    .sort(([, workerA], [, workerB]) =>
-                        workerA.numOfJobs - workerB.numOfJobs
-                    )[0];
+                if(message.islandAmount > 1){
+                    //Get amount of healthy islands
+                    const healthyIslands = [...workers.entries()]
+                        .filter(([workerId, worker]) =>
+                            worker.status === "HEALTHY" &&
+                            workerId !== "Dev-Node" &&
+                            worker.type === "island"
+                        );
+
+                    if(healthyIslands.length < message.islandAmount){
+                        socket.write(JSON.stringify({
+                            type: "JOB_ERROR",
+                            jobId: message.jobId,
+                            error: `Not enough healthy islands available. Requested: ${message.islandAmount}, Available: ${healthyIslands.length}`
+                        }) + "\n");
+                        continue;
+                    }
+
+                    //Pick islands to run the job on
+                    const selectedIslands = healthyIslands
+                        .sort(([, workerA], [, workerB]) =>
+                            workerA.numOfJobs - workerB.numOfJobs
+                        )
+                        .slice(0, message.islandAmount);
+                    
+                    //Send island group job to selected islands
+                    for(const [workerId, worker] of selectedIslands){
+                        worker.numOfJobs++;
+                        jobs.set(`${message.jobId}-${workerId}`, {
+                            jobId: `${message.jobId}-${workerId}`,
+                            status: JobStatus.QUEUED,
+                            kind: message.kind,
+                            input: message.input,
+                            assignedWorkerId: workerId,
+                            groupJob: true,
+                            developerSocket: socket
+                        });
+
+                        worker.socket.write(JSON.stringify({
+                            type: "RUN_JOB",
+                            jobId: `${message.jobId}-${workerId}`,
+                            kind: message.kind,
+                            groupJob: true,
+                            input: message.input
+                        }) + "\n");
+                    }
+                } else {
+                    const targetIslandId = message.input?.targetWorkerId;
+                    const islandEntry = [...workers.entries()]
+                        .filter(([workerId, worker]) =>
+                            worker.status === "HEALTHY" &&
+                            workerId !== "Dev-Node" &&
+                            worker.type === "island" &&
+                            (!targetIslandId || workerId === targetIslandId)
+                        )
+                        .sort(([, workerA], [, workerB]) =>
+                            workerA.numOfJobs - workerB.numOfJobs
+                        )[0];
 
 
-                if (!islandEntry) {
-                    socket.write(JSON.stringify({
-                        type: "JOB_ERROR",
+                    if (!islandEntry) {
+                        socket.write(JSON.stringify({
+                            type: "JOB_ERROR",
+                            jobId: message.jobId,
+                            error: "No healthy islands available"
+                        }) + "\n");
+                        continue;
+                    }
+
+                    const [workerId, worker] = islandEntry;
+                    worker.numOfJobs++;
+                    jobs.set(message.jobId, {
                         jobId: message.jobId,
-                        error: "No healthy islands available"
+                        status: JobStatus.QUEUED,
+                        kind: message.kind,
+                        input: message.input,
+                        assignedWorkerId: workerId,
+                        developerSocket: socket // The socket of whoever asked for the job
+                    });
+
+                    worker.socket.write(JSON.stringify({
+                        type: "RUN_JOB",
+                        jobId: message.jobId,
+                        kind: message.kind,
+                        input: message.input
                     }) + "\n");
-                    continue;
+
+                    console.log(`Assigned ${message.jobId} to ${workerId}`);
                 }
 
-                const [workerId, worker] = islandEntry;
-                worker.numOfJobs++;
-                jobs.set(message.jobId, {
-                    jobId: message.jobId,
-                    status: JobStatus.QUEUED,
-                    kind: message.kind,
-                    input: message.input,
-                    assignedWorkerId: workerId,
-                    developerSocket: socket // The socket of whoever asked for the job
-                });
+               
+            }
 
-                worker.socket.write(JSON.stringify({
-                    type: "RUN_JOB",
-                    jobId: message.jobId,
-                    kind: message.kind,
-                    input: message.input
-                }) + "\n");
-
-                console.log(`Assigned ${message.jobId} to ${workerId}`);
+            if(message.type === "EXCHANGE_BEST_CANDIDATE"){
+                if(islandExachangeDict[message.jobId]){
+                    islandExachangeDict[message.jobId][message.workerId] = message.bestCandidate;
+                }
             }
 
             if(message.type === "STARTING_JOB") {

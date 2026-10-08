@@ -7,6 +7,14 @@ let currentJobId: string | null = null;
 let heartbeat = true; //Debug Flag to sim failures
 
 let jobPopulationSize = 10;
+let exchangeRate = 3; //Exchange best canadidates every 3 generations
+
+let waitingForExchange:
+    | {
+        jobId: string;
+        resolve: (candidate: string) => void;
+      }
+    | undefined;
 
 const socket = createConnection(
     {
@@ -68,6 +76,12 @@ socket.on("data", (data) => { //Get any data from coordinator
             startNextJob();
         }
 
+        if (message.type === "BEST_CANDIDATE_EXCHANGE" && waitingForExchange) {
+            if (message.jobId === waitingForExchange.jobId) {
+                waitingForExchange.resolve(message.newBestCandidate);
+                waitingForExchange = undefined;
+            }
+        }
 
         if (message.type === "DISCONNECT") {
             console.log(`Received disconnect message from coordinator: ${message.reason}`);
@@ -87,7 +101,7 @@ function score(candidate: string): number {
     return candidate.split("").filter(bit => bit === "1").length;
 }
 
-function startNextJob(): void {
+async function startNextJob(): Promise<void> {
     if (currentJobId !== null || jobsQueue.length === 0) {
         return;
     }
@@ -120,7 +134,13 @@ function startNextJob(): void {
     };
 
     if (message.kind === "OneMax") {
-        const { bitLength, genAmount, populationSize, jobLength = 0 } = message.input;
+
+        if(message.groupJob){
+            //Will be running this in parallel with other islands]
+            //Every 3 generations send a message to the coordinator saying we finished
+            //a cycle and then send out best canadidate and wait for coordinator to send back best candidates from other islands
+        }
+        const { bitLength, genAmount, populationSize, islandAmount, jobLength } = message.input;
         if (!Number.isInteger(bitLength) || bitLength < 1 ||
             !Number.isInteger(genAmount) || genAmount < 0 ||
             !Number.isInteger(populationSize) || populationSize < 2 ||
@@ -137,6 +157,26 @@ function startNextJob(): void {
         let bestCandidate = population[0];
 
         for (let generation = 0; generation < genAmount && score(bestCandidate) < bitLength; generation++) {
+            if(message.groupJob && generation > 0 && generation % exchangeRate === 0){
+                //Send best candidate to coordinator and wait for best candidates from other islands
+                const newCandidatePromise = new Promise<string>((resolve) => {
+                    waitingForExchange = {
+                        jobId: message.jobId,
+                        resolve
+                    };
+                });
+
+                socket.write(JSON.stringify({
+                    type: "EXCHANGE_BEST_CANDIDATE",
+                    workerId,
+                    jobId: message.jobId,
+                    bestCandidate
+                }) + "\n");
+
+                const newCandidate = await newCandidatePromise;
+                console.log(`Received new candidate: ${newCandidate}`);
+                
+            }
             population = beginGeneration(population, bitLength);
             const generationBest = population.reduce((best, candidate) =>
                 score(candidate) > score(best) ? candidate : best

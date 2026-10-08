@@ -56,9 +56,9 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
                 console.log(`Submitted ${jobId}: sum ${start} through ${end}`);
             }
         } else if (command === "oneMax") {
-            const [bitLength, genAmount, populationSize, jobLength] = args.map(Number);
-            if (args.length !== 4 || ![bitLength, genAmount, populationSize, jobLength].every(Number.isFinite)) {
-                console.log("Usage: oneMax <bitLength> <genAmount> <populationSize> <milliseconds>");
+            const [bitLength, genAmount, populationSize, islandAmount, jobLength] = args.map(Number);
+            if (args.length !== 5 || ![bitLength, genAmount, populationSize, islandAmount, jobLength].every(Number.isFinite)) {
+                console.log("Usage: oneMax <bitLength> <genAmount> <populationSize> <islandAmount> <milliseconds>");
             } else {
                 const jobId = makeJobId();
                 pendingJobs.add(jobId);
@@ -66,6 +66,7 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
                     type: "SUBMIT_ISLAND_JOB",
                     jobId,
                     kind: "OneMax",
+                    islandAmount: islandAmount,
                     input: { bitLength, genAmount, populationSize, jobLength }
                 }) + "\n");
                 console.log(`Submitted ${jobId}: oneMax with bit length ${bitLength}, generations ${genAmount}`);
