@@ -10,7 +10,8 @@
     "worker": "npx tsx src/worker.ts",
     "developer": "npx tsx src/developer.ts",
     "island": "npx tsx src/island.ts",
-    "start-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-cluster.ps1"
+    "start-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-cluster.ps1",
+    "start-island-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-island-cluster.ps1"
   },
   "dependencies": {
     "node": "^26.8.2",

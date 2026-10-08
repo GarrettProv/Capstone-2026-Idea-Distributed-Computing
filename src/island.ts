@@ -80,7 +80,11 @@ socket.on("data", (data) => { //Get any data from coordinator
 });
 
 function getRandomInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function score(candidate: string): number {
+    return candidate.split("").filter(bit => bit === "1").length;
 }
 
 function startNextJob(): void {
@@ -116,98 +120,67 @@ function startNextJob(): void {
     };
 
     if (message.kind === "OneMax") {
-        let lastGen: Record<string, string> = {};
-        const {bitLength, genAmount, populationSize, jobLength} = message.input;
+        const { bitLength, genAmount, populationSize, jobLength = 0 } = message.input;
+        if (!Number.isInteger(bitLength) || bitLength < 1 ||
+            !Number.isInteger(genAmount) || genAmount < 0 ||
+            !Number.isInteger(populationSize) || populationSize < 2 ||
+            !Number.isFinite(jobLength) || jobLength < 0) {
+            finishJob("Invalid OneMax parameters");
+            return;
+        }
+
+        jobPopulationSize = populationSize;
         console.log(`Received OneMax job with bit length ${bitLength}, generations ${genAmount}, population size ${populationSize}`);
-        jobPopulationSize = populationSize; // Update the global population size based on the job input
-        for(let i = 0; i < jobPopulationSize; i++){
-            const randomBinaryString = Array.from({ length: bitLength }, () => getRandomInt(0, 1)).join('');
-            lastGen[i] = randomBinaryString;
-        }
-        console.log(genAmount);
-        for(let i = 0; i < genAmount; i++){
-            lastGen = beginGeneration("OneMax", i, lastGen, bitLength)
-            console.log("lastGen: " + JSON.stringify(lastGen));
-            console.log(`Generation ${i} completed. Best candidate: ${lastGen[0]}. Whole generation: ${JSON.stringify(lastGen)}`);
-        }
-        let bestScore = -1;
-        for(let i = 0; i < jobPopulationSize; i++){
-            const currentScore = lastGen[i].split("").filter(bit => bit === "1").length;
-            if(currentScore > bestScore){
-                bestScore = currentScore;
-            }
+        let population = Array.from({ length: populationSize }, () =>
+            Array.from({ length: bitLength }, () => getRandomInt(0, 1)).join("")
+        );
+        let bestCandidate = population[0];
+
+        for (let generation = 0; generation < genAmount && score(bestCandidate) < bitLength; generation++) {
+            population = beginGeneration(population, bitLength);
+            const generationBest = population.reduce((best, candidate) =>
+                score(candidate) > score(best) ? candidate : best
+            );
+            if (score(generationBest) > score(bestCandidate)) bestCandidate = generationBest;
+            console.log(`Generation ${generation + 1}: best ${bestCandidate}, score ${score(bestCandidate)}/${bitLength}`);
         }
 
-        setTimeout(() => finishJob(bestScore), message.input.jobLength ?? 0);
+        setTimeout(() => finishJob(score(bestCandidate)), jobLength);
     }
 }
 
-function beginGeneration(kind:string, currentGen:number, lastGen: Record<string, string>, bitLength: number): any{
-    if(kind == "OneMax"){
-        let currentBest: string = "";
+function beginGeneration(population: string[], bitLength: number): string[] {
+    const rankedPopulation = population
+        .map((candidate, index) => ({ candidate, index, fitness: score(candidate) }))
+        .sort((a, b) => b.fitness - a.fitness);
+    const nextGeneration = [rankedPopulation[0].candidate]; // Keep the best candidate.
 
-        //score the last generation
-        for(let i = 0; i < jobPopulationSize - 1; i++){
-            console.log(`Candidate ${i}: ${lastGen[i]} Score: ${lastGen[i].split("").filter(bit => bit === "1").length}`);
-            const currentScore = lastGen[i].split("").filter(bit => bit === "1").length;
-            const bestScore = currentBest.split("").filter(bit => bit === "1").length;
-            if(currentScore > bestScore){
-                currentBest = lastGen[i];
-            }
+    while (nextGeneration.length < jobPopulationSize) {
+        const parent1 = selectRandomCandidate(rankedPopulation, 0.8);
+        const parent2 = selectRandomCandidate(rankedPopulation, 0);
+        let child = "";
+        for (let bit = 0; bit < bitLength; bit++) {
+            child += getRandomInt(0, 1) === 1 ? parent1[bit] : parent2[bit];
         }
 
-        let newGeneration: Record<string, string> = { 0: currentBest }; //Keep best one and generate others
-        let lastGenerationFitness: Record<string, number> = {};
-        for(let i = 0; i < jobPopulationSize; i++){
-            lastGenerationFitness[i] = lastGen[i].split("").filter(bit => bit === "1").length;
+        // Give each child a 10% chance of one bit flip.
+        if (getRandomInt(0, 99) < 10) {
+            const mutationIndex = getRandomInt(0, bitLength - 1);
+            child = child.substring(0, mutationIndex) +
+                (child[mutationIndex] === "0" ? "1" : "0") +
+                child.substring(mutationIndex + 1);
         }
-        for(let i = 0; i < jobPopulationSize - 1; i++){
-            let parent1: number = selectRandomCandidate(lastGenerationFitness, .80);
-            let parent2: number = selectRandomCandidate(lastGenerationFitness, 0);
-            let child: string = "";
-            for(let i = 0; i < bitLength; i++){
-                let randomBit:number = getRandomInt(0,1);
-                if(randomBit == 1){
-                    child += lastGen[parent1][i];
-                }else{
-                    child += lastGen[parent2][i];
-                }
-            }
-            //Simulate mutation
-            let mutationChance: number = getRandomInt(0, 100);
-            if(mutationChance < 10){ // 10% mutation rate
-                let mutationIndex: number = getRandomInt(0, bitLength - 1);
-                child = child.substring(0, mutationIndex) + (child[mutationIndex] === "0" ? "1" : "0") + child.substring(mutationIndex + 1);
-            }
-            newGeneration[i+1] = child;
-        }
-        console.log("New Generation: " + JSON.stringify(newGeneration));
-        return newGeneration;
+        nextGeneration.push(child);
     }
+    return nextGeneration;
 }
 
-function selectRandomCandidate(populationFitness:Record<string, number>, topPercent: number): number{
-    for(const key in populationFitness){
-        //Grab a random candidate from the top percent of the populations fitness
-        let possibleCandidates: number[] = [];
-        const fitness = populationFitness[key];
-        const threshold = Math.floor(topPercent * 100);
-        for(const key in populationFitness){
-            if(populationFitness[key] >= threshold){
-                possibleCandidates.push(Number(key));
-            }
-        }
-        if(possibleCandidates.length > 0){
-            const randomIndex = Math.floor(Math.random() * possibleCandidates.length);
-            return randomIndex;
-        } else {
-            // If no candidates meet the threshold, return a random candidate from the entire population
-            const allCandidates = Object.keys(populationFitness).map(Number);
-            const randomIndex = Math.floor(Math.random() * allCandidates.length);
-            return allCandidates[randomIndex];
-        }
-    }
-    return 0;
+function selectRandomCandidate(
+    rankedPopulation: { candidate: string; index: number; fitness: number }[],
+    topFraction: number
+): string {
+    const eligibleCount = Math.max(1, Math.ceil(rankedPopulation.length * (1 - topFraction)));
+    return rankedPopulation[getRandomInt(0, eligibleCount - 1)].candidate;
 }
 
 
