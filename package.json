@@ -9,6 +9,7 @@
     "coordinator": "npx tsx src/coordinator.ts",
     "worker": "npx tsx src/worker.ts",
     "developer": "npx tsx src/developer.ts",
+    "island": "npx tsx src/island.ts",
     "start-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-cluster.ps1"
   },
   "dependencies": {

@@ -55,6 +55,22 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
                 const jobId = submitSum(start, end, jobLength);
                 console.log(`Submitted ${jobId}: sum ${start} through ${end}`);
             }
+        } else if (command === "oneMax") {
+            const [bitLength, genAmount, populationSize, jobLength] = args.map(Number);
+            if (args.length !== 4 || ![bitLength, genAmount, populationSize, jobLength].every(Number.isFinite)) {
+                console.log("Usage: oneMax <bitLength> <genAmount> <populationSize> <milliseconds>");
+            } else {
+                const jobId = makeJobId();
+                pendingJobs.add(jobId);
+                socket.write(JSON.stringify({
+                    type: "SUBMIT_ISLAND_JOB",
+                    jobId,
+                    kind: "OneMax",
+                    input: { bitLength, genAmount, populationSize, jobLength }
+                }) + "\n");
+                console.log(`Submitted ${jobId}: oneMax with bit length ${bitLength}, generations ${genAmount}`);
+            }
+
         } else if (command === "batch") {
             const [count, start, end, jobLength] = args.map(Number);
             if (args.length !== 4 || !Number.isInteger(count) || count < 1 || count > 100 ||

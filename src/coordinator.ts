@@ -10,6 +10,7 @@ type WorkerInfo = {
     unhealthySince?: number; 
     jobsQueueDebug?: string[]; // Optional debug information about the jobs in the queue
     currentJobId?: string | null;
+    type?: "worker" | "island"; 
 };
 
 enum JobStatus {
@@ -97,7 +98,8 @@ const server = createServer((socket) => {
                     socket: socket,
                     status: "HEALTHY",
                     lastSeen: Date.now(),
-                    numOfJobs: 0
+                    numOfJobs: 0,
+                    type: message.workerType ?? "worker"
                 });
 
                 console.log(`Registered worker: ${message.workerId}`);
@@ -204,6 +206,50 @@ const server = createServer((socket) => {
                 }
 
                 const [workerId, worker] = workerEntry;
+                worker.numOfJobs++;
+                jobs.set(message.jobId, {
+                    jobId: message.jobId,
+                    status: JobStatus.QUEUED,
+                    kind: message.kind,
+                    input: message.input,
+                    assignedWorkerId: workerId,
+                    developerSocket: socket // The socket of whoever asked for the job
+                });
+
+                worker.socket.write(JSON.stringify({
+                    type: "RUN_JOB",
+                    jobId: message.jobId,
+                    kind: message.kind,
+                    input: message.input
+                }) + "\n");
+
+                console.log(`Assigned ${message.jobId} to ${workerId}`);
+            }
+
+            if (message.type === "SUBMIT_ISLAND_JOB") {
+               const targetIslandId = message.input?.targetWorkerId;
+               const islandEntry = [...workers.entries()]
+                    .filter(([workerId, worker]) =>
+                        worker.status === "HEALTHY" &&
+                        workerId !== "Dev-Node" &&
+                        worker.type === "island" &&
+                        (!targetIslandId || workerId === targetIslandId)
+                    )
+                    .sort(([, workerA], [, workerB]) =>
+                        workerA.numOfJobs - workerB.numOfJobs
+                    )[0];
+
+
+                if (!islandEntry) {
+                    socket.write(JSON.stringify({
+                        type: "JOB_ERROR",
+                        jobId: message.jobId,
+                        error: "No healthy islands available"
+                    }) + "\n");
+                    continue;
+                }
+
+                const [workerId, worker] = islandEntry;
                 worker.numOfJobs++;
                 jobs.set(message.jobId, {
                     jobId: message.jobId,
