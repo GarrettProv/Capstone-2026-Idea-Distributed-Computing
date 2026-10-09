@@ -7,7 +7,6 @@ let currentJobId: string | null = null;
 let heartbeat = true; //Debug Flag to sim failures
 
 let jobPopulationSize = 10;
-let exchangeRate = 3; //Exchange best canadidates every 3 generations
 
 let waitingForExchange:
     | {
@@ -88,6 +87,38 @@ socket.on("data", (data) => { //Get any data from coordinator
             socket.end();
         }
 
+        if(message.type === "GROUP_JOB_COMPLETED"){
+            console.log(`Received group job completed message for job ${message.jobId}`);
+            const queuedJobIndex = jobsQueue.findIndex(job => job.jobId === message.jobId);
+            if (queuedJobIndex !== -1) {
+                jobsQueue.splice(queuedJobIndex, 1);
+            }
+
+            if(currentJobId === message.jobId){
+                console.log(`Group job ${message.jobId} completed. Stopping current job.`);
+                //Complete current job
+                if (currentJobId === message.jobId) {
+                    currentJobId = null;
+                }
+                //Send coordinator a message that we completed the job
+                socket.write(JSON.stringify({
+                    type: "JOB_RESULT",
+                    workerId,
+                    jobId: message.jobId,
+                    result: "Group job completed"
+                }) + "\n");
+                
+                if (waitingForExchange?.jobId === message.jobId) {
+                    if(waitingForExchange){
+                        waitingForExchange.resolve("");
+                        waitingForExchange = undefined;
+                    }
+
+                }
+            }
+            startNextJob();
+        }
+
     }
 
 
@@ -118,7 +149,9 @@ async function startNextJob(): Promise<void> {
 
     console.log(`Starting job: ${message.jobId}`);
 
+    let groupJobCompleted = false;
     const finishJob = (result: unknown): void => {
+        if (groupJobCompleted) return;
         const jobResult = {
             type: "JOB_RESULT",
             workerId,
@@ -157,8 +190,9 @@ async function startNextJob(): Promise<void> {
         let bestCandidate = population[0];
 
         for (let generation = 0; generation < genAmount && score(bestCandidate) < bitLength; generation++) {
-            if(message.groupJob && generation > 0 && generation % exchangeRate === 0){
+            if(message.groupJob && generation > 0 && generation % (message.input?.exchangeRate ?? 3) === 0){
                 //Send best candidate to coordinator and wait for best candidates from other islands
+                console.log("Sending best candidate to coordinator for exchange");
                 const newCandidatePromise = new Promise<string>((resolve) => {
                     waitingForExchange = {
                         jobId: message.jobId,
@@ -170,11 +204,15 @@ async function startNextJob(): Promise<void> {
                     type: "EXCHANGE_BEST_CANDIDATE",
                     workerId,
                     jobId: message.jobId,
+                    islandAmount: islandAmount,
                     bestCandidate
                 }) + "\n");
 
+                console.log("Waiting for best candidates from other islands...");
                 const newCandidate = await newCandidatePromise;
-                console.log(`Received new candidate: ${newCandidate}`);
+                if (groupJobCompleted) return;
+                bestCandidate = newCandidate; //swap out  best candidate with new candidate
+                console.log(`Generation ${generation + 1}: best ${bestCandidate}, score ${score(bestCandidate)}/${bitLength}`);
                 
             }
             population = beginGeneration(population, bitLength);

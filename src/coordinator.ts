@@ -48,6 +48,14 @@ async function writeWorkerSnapshot(): Promise<void> {
         ...Array.from(jobs.entries()).map(([jobId, jobInfo]) => {
             return `Job ID: ${jobId}, Status: ${jobInfo.status}, Assigned Worker: ${jobInfo.assignedWorkerId || "None"}, Result: ${jobInfo.result ?? "None"}`;
         }),
+        "",
+        "Island Exchange Dictionary:",
+        ...(Object.keys(islandExachangeDict).length === 0
+            ? ["None"]
+            : Object.entries(islandExachangeDict).flatMap(([jobId, candidates]) => [
+                `Job ID: ${jobId}`,
+                ...Object.entries(candidates).map(([workerId, candidate]) => `  ${workerId}: ${candidate}`)
+            ])),
         ""
     ];
 
@@ -231,7 +239,7 @@ const server = createServer((socket) => {
             }
 
             if (message.type === "SUBMIT_ISLAND_JOB") {
-                if(message.islandAmount > 1){
+                if(message.input.islandAmount > 1){
                     //Get amount of healthy islands
                     const healthyIslands = [...workers.entries()]
                         .filter(([workerId, worker]) =>
@@ -240,7 +248,7 @@ const server = createServer((socket) => {
                             worker.type === "island"
                         );
 
-                    if(healthyIslands.length < message.islandAmount){
+                    if(healthyIslands.length < message.input.islandAmount){
                         socket.write(JSON.stringify({
                             type: "JOB_ERROR",
                             jobId: message.jobId,
@@ -254,7 +262,7 @@ const server = createServer((socket) => {
                         .sort(([, workerA], [, workerB]) =>
                             workerA.numOfJobs - workerB.numOfJobs
                         )
-                        .slice(0, message.islandAmount);
+                        .slice(0, message.input.islandAmount);
                     
                     //Send island group job to selected islands
                     for(const [workerId, worker] of selectedIslands){
@@ -325,8 +333,39 @@ const server = createServer((socket) => {
             }
 
             if(message.type === "EXCHANGE_BEST_CANDIDATE"){
-                if(islandExachangeDict[message.jobId]){
-                    islandExachangeDict[message.jobId][message.workerId] = message.bestCandidate;
+                console.log(`Received best candidate exchange for job ${message.jobId} from worker ${message.workerId}: ${message.bestCandidate}`);
+                // Job IDs are in the form: 'job-1791557525841-atkxi-island-2' 
+                //Need to strip the island-2 off the end
+                const baseJobId = message.jobId.replace(/-island-\d+$/, '');
+
+                if(!islandExachangeDict[baseJobId])
+                    islandExachangeDict[baseJobId] = {};
+                islandExachangeDict[baseJobId][message.workerId] = message.bestCandidate;
+                console.log('Current exchange dict:', islandExachangeDict, 'And has length: ', Object.keys(islandExachangeDict[baseJobId]).length, '/n Expected: ', message.islandAmount);
+                if(islandExachangeDict[baseJobId] && Object.keys(islandExachangeDict[baseJobId]).length >= message.islandAmount){
+                    console.log(`All best candidates received for job ${message.jobId}. Proceeding with exchange.`);
+                    //Plan to exchange all best candidates to other islands in a ring topology
+                    const bestCandidates = Object.entries(islandExachangeDict[baseJobId]);
+                    for(let i = 0; i < bestCandidates.length; i++){
+                        //Send a message to each of the islands with their new canadite
+                        const [workerId, bestCandidate] = bestCandidates[i];
+                        const nextIslandIndex = (i + 1) % bestCandidates.length;
+                        const [nextWorkerId, nextBestCandidate] = bestCandidates[nextIslandIndex];
+                        const worker = workers.get(nextWorkerId);
+                        
+                        if(worker){
+                            worker.socket.write(JSON.stringify({
+                                type: "BEST_CANDIDATE_EXCHANGE",
+                                jobId: baseJobId + "-" + nextWorkerId,
+                                newBestCandidate: bestCandidate
+                            }) + "\n");
+                        }
+
+
+                        //Clear exchange dict for this job
+                        delete islandExachangeDict[baseJobId];
+
+                    }
                 }
             }
 
@@ -344,6 +383,28 @@ const server = createServer((socket) => {
                 if (!jobInfo || jobInfo.status === JobStatus.COMPLETED) {
                     console.log(`Ignoring duplicate or unknown result for ${message.jobId}`);
                     continue;
+                }
+
+                //if group job. Complete group job and send message to all workers with the job that its been completed and they can stop
+                if (jobInfo && jobInfo.groupJob) {
+                    const baseJobId = message.jobId.replace(/-island-\d+$/, '');
+
+                    for (const [participantId, participant] of jobs) {
+                        if (participant.groupJob && participant.jobId.startsWith(`${baseJobId}-`) && participant.status !== JobStatus.COMPLETED) {
+                            participant.status = JobStatus.COMPLETED;
+                            const worker = workers.get(participant.assignedWorkerId ?? "");
+                            if (worker) {
+                                console.log(`Sending group job completion message to ${participant.assignedWorkerId} for job ${participantId}`);
+                                worker.socket.write(JSON.stringify({
+                                    type: "GROUP_JOB_COMPLETED",
+                                    jobId: participantId
+                                }) + "\n");
+                            }
+                        }
+                    }
+
+                    //Clear the exchange dict for this job since its completed
+                    delete islandExachangeDict[baseJobId];
                 }
 
                 const worker = workers.get(message.workerId);
