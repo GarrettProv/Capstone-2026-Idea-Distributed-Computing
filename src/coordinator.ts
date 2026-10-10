@@ -34,9 +34,12 @@ type JobInfo = {
 const workers = new Map<string, WorkerInfo>();
 const jobs = new Map<string, JobInfo>(); // jobId -> job information
 const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
+const groupResults = new Map<string, { workerId: string; result: number }[]>();
 
 // JobId -> {WorkerId -> Offered Canadite}
 let islandExachangeDict: Record<string, Record<string, number>> = {}
+const groupResultTimers = new Map<string, NodeJS.Timeout>();
+const GROUP_RESULT_WINDOW_MS = 10_000;
 
 async function writeWorkerSnapshot(): Promise<void> {
     const generatedAt = new Date();
@@ -379,32 +382,80 @@ const server = createServer((socket) => {
             if(message.type === "JOB_RESULT") {
                 console.log(`Received result for ${message.jobId}: ${message.result}`);
                 const jobInfo = jobs.get(message.jobId);
+                const baseJobId = message.jobId.replace(/-island-\d+$/, '');
 
-                if (!jobInfo || jobInfo.status === JobStatus.COMPLETED) {
+                if (!jobInfo || (jobInfo.status === JobStatus.COMPLETED &&
+                    (!jobInfo.groupJob || !groupResultTimers.has(baseJobId)))) {
                     console.log(`Ignoring duplicate or unknown result for ${message.jobId}`);
                     continue;
                 }
 
                 //if group job. Complete group job and send message to all workers with the job that its been completed and they can stop
                 if (jobInfo && jobInfo.groupJob) {
-                    const baseJobId = message.jobId.replace(/-island-\d+$/, '');
+                    delete islandExachangeDict[baseJobId];
+                    const results = groupResults.get(baseJobId) ?? [];
+                    results.push({ workerId: message.workerId, result: message.result });
+                    groupResults.set(baseJobId, results);
 
-                    for (const [participantId, participant] of jobs) {
-                        if (participant.groupJob && participant.jobId.startsWith(`${baseJobId}-`) && participant.status !== JobStatus.COMPLETED) {
-                            participant.status = JobStatus.COMPLETED;
-                            const worker = workers.get(participant.assignedWorkerId ?? "");
-                            if (worker) {
-                                console.log(`Sending group job completion message to ${participant.assignedWorkerId} for job ${participantId}`);
-                                worker.socket.write(JSON.stringify({
-                                    type: "GROUP_JOB_COMPLETED",
-                                    jobId: participantId
+                    // Keep collecting results and start only one timer for this group
+                    if (!groupResultTimers.has(baseJobId)) {
+                        const timer = setTimeout(() => {
+                            groupResultTimers.delete(baseJobId);
+                            const collectedResults = groupResults.get(baseJobId) ?? [];
+                            const groupJobs = [...jobs.entries()].filter(([, participant]) =>
+                                participant.groupJob && participant.jobId.startsWith(`${baseJobId}-`)
+                            );
+                            const bestResult = collectedResults.reduce<{ workerId: string; result: number } | undefined>(
+                                (best, current) => !best || current.result > best.result ? current : best,
+                                undefined
+                            );
+
+                            for (const [participantId, participant] of groupJobs) {
+                                if (participant.status !== JobStatus.COMPLETED) {
+                                    const worker = workers.get(participant.assignedWorkerId ?? "");
+                                    if (worker) {
+                                        worker.socket.write(JSON.stringify({
+                                            type: "GROUP_JOB_COMPLETED",
+                                            jobId: participantId
+                                        }) + "\n");
+                                    }
+                                }
+                                participant.status = JobStatus.COMPLETED;
+                                participant.result = collectedResults.find(
+                                    result => result.workerId === participant.assignedWorkerId
+                                )?.result;
+                            }
+                            groupResults.delete(baseJobId);
+
+                            if (bestResult) {
+                                const firstJob = groupJobs[0]?.[1];
+                                firstJob?.developerSocket.write(JSON.stringify({
+                                    type: "JOB_RESULT",
+                                    jobId: baseJobId,
+                                    result: bestResult.result,
+                                    workerId: bestResult.workerId
                                 }) + "\n");
                             }
-                        }
+                            delete islandExachangeDict[baseJobId];
+
+                        }, GROUP_RESULT_WINDOW_MS);
+
+                        groupResultTimers.set(baseJobId, timer);
                     }
 
-                    //Clear the exchange dict for this job since its completed
-                    delete islandExachangeDict[baseJobId];
+                    jobInfo.status = JobStatus.COMPLETED;
+                    jobInfo.result = message.result;
+                    jobInfo.developerSocket.write(JSON.stringify({
+                        type: "JOB_RESULT_RECEIVED",
+                        jobId: baseJobId
+                    }) + "\n");
+                    const worker = workers.get(message.workerId);
+                    if (worker) {
+                        worker.lastSeen = Date.now();
+                        worker.currentJobId = null;
+                        worker.numOfJobs = Math.max(0, worker.numOfJobs - 1);
+                    }
+                    continue;
                 }
 
                 const worker = workers.get(message.workerId);

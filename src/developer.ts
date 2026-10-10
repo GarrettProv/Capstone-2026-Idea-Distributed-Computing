@@ -1,6 +1,9 @@
 import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 
+const averageJobs = new Map<string, number>();
+let averageBatchSize = 0;
+
 const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
     console.log("Connected to coordinator. Type help for developer commands.");
 
@@ -71,6 +74,32 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
                 console.log(`Submitted ${jobId}: oneMax with bit length ${bitLength}, generations ${genAmount}`);
             }
 
+        } else if( command === "oneMaxAvg") {
+
+            const [bitLength, genAmount, populationSize, islandAmount, exchangeRate, batchAmount, jobLength] = args.map(Number);
+            
+            if (args.length !== 7 || ![bitLength, genAmount, populationSize, islandAmount, exchangeRate, batchAmount, jobLength].every(Number.isFinite)) {
+                console.log("Usage: oneMaxAvg <bitLength> <genAmount> <populationSize> <islandAmount> <exchangeRate> <batchAmount> <milliseconds>");
+            } else {
+                averageBatchSize = batchAmount;
+                for(let i = 0; i < batchAmount; i++) {
+
+                    const jobId = makeJobId();
+
+                    averageJobs.set(jobId, NaN);
+                    pendingJobs.add(jobId);
+                    socket.write(JSON.stringify({
+                        type: "SUBMIT_ISLAND_JOB",
+                        jobId,
+                        kind: "OneMax",
+                        input: { bitLength, genAmount, populationSize, jobLength, islandAmount, exchangeRate }
+                    }) + "\n");
+                    console.log(`Submitted ${jobId}: oneMax with bit length ${bitLength}, generations ${genAmount}`);
+                }
+                //Somehow avg all answeres recived
+
+                
+            }
         } else if (command === "batch") {
             const [count, start, end, jobLength] = args.map(Number);
             if (args.length !== 4 || !Number.isInteger(count) || count < 1 || count > 100 ||
@@ -131,6 +160,17 @@ const socket = createConnection({ host: "127.0.0.1", port: 3000 }, () => {
             const message = JSON.parse(line);
             if (message.type === "JOB_RESULT") {
                 pendingJobs.delete(message.jobId);
+                if (averageJobs.has(message.jobId)) {
+                    averageJobs.set(message.jobId, Number(message.result));
+
+                    if ([...averageJobs.values()].every(Number.isFinite)) {
+                        const scores = [...averageJobs.values()];
+                        const average = scores.reduce((sum, score) => sum + score, 0) / averageBatchSize;
+
+                        console.log(`Average OneMax score across ${averageBatchSize} jobs: ${average}`);
+                        averageJobs.clear();
+                    }
+                }
                 console.log(`\nReceived result for ${message.jobId}: ${message.result}`);
             } else if (message.type === "JOB_ERROR") {
                 if (message.jobId) pendingJobs.delete(message.jobId);

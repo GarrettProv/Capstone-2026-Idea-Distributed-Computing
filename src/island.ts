@@ -107,7 +107,7 @@ socket.on("data", (data) => { //Get any data from coordinator
                     jobId: message.jobId,
                     result: "Group job completed"
                 }) + "\n");
-                
+
                 if (waitingForExchange?.jobId === message.jobId) {
                     if(waitingForExchange){
                         waitingForExchange.resolve("");
@@ -156,6 +156,7 @@ async function startNextJob(): Promise<void> {
             type: "JOB_RESULT",
             workerId,
             jobId: message.jobId,
+            jobKind: message.kind,
             result
         };
 
