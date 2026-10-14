@@ -31,13 +31,20 @@ type JobInfo = {
     developerSocket: Socket; //So i can track who asked for a job
 };
 
+type GroupJobInfo = {
+    groupJobId: string;
+    associatedJobIds: string[];
+    associatedWorkerIds: string[];
+    workerJobStatuses: Record<string, JobStatus>; // workerId -> JobStatus
+    results: Record<string, any>; // workerId -> result
+}
+
 const workers = new Map<string, WorkerInfo>();
 const jobs = new Map<string, JobInfo>(); // jobId -> job information
+let currentGroupJobs: GroupJobInfo[] = []; //All current group jobs
 const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
-const groupResults = new Map<string, { workerId: string; result: number }[]>();
-
-// JobId -> {WorkerId -> Offered Canadite}
-let islandExachangeDict: Record<string, Record<string, number>> = {}
+// JobId -> {ExchangeRound -> {WorkerId -> Offered Canadite}}
+let islandExachangeDict: Record<string, Record<number, Record<string, number>>> = {}
 const groupResultTimers = new Map<string, NodeJS.Timeout>();
 const GROUP_RESULT_WINDOW_MS = 10_000;
 
@@ -57,7 +64,10 @@ async function writeWorkerSnapshot(): Promise<void> {
             ? ["None"]
             : Object.entries(islandExachangeDict).flatMap(([jobId, candidates]) => [
                 `Job ID: ${jobId}`,
-                ...Object.entries(candidates).map(([workerId, candidate]) => `  ${workerId}: ${candidate}`)
+                ...Object.entries(candidates).flatMap(([exchangeRound, workerCandidates]) => [
+                    `  Exchange Round ${exchangeRound}:`,
+                    ...Object.entries(workerCandidates).map(([workerId, candidate]) => `    ${workerId}: ${candidate}`)
+                ])
             ])),
         ""
     ];
@@ -266,7 +276,15 @@ const server = createServer((socket) => {
                             workerA.numOfJobs - workerB.numOfJobs
                         )
                         .slice(0, message.input.islandAmount);
-                    
+
+                    currentGroupJobs.push({
+                        groupJobId: message.jobId,
+                        associatedJobIds: selectedIslands.map(([workerId]) => `${message.jobId}-${workerId}`),
+                        associatedWorkerIds: selectedIslands.map(([workerId]) => workerId),
+                        workerJobStatuses: Object.fromEntries(selectedIslands.map(([workerId]) => [workerId, JobStatus.QUEUED])),
+                        results: {}
+                    });
+
                     //Send island group job to selected islands
                     for(const [workerId, worker] of selectedIslands){
                         worker.numOfJobs++;
@@ -341,14 +359,20 @@ const server = createServer((socket) => {
                 //Need to strip the island-2 off the end
                 const baseJobId = message.jobId.replace(/-island-\d+$/, '');
 
-                if(!islandExachangeDict[baseJobId])
+                if(!islandExachangeDict[baseJobId]){
                     islandExachangeDict[baseJobId] = {};
-                islandExachangeDict[baseJobId][message.workerId] = message.bestCandidate;
+                }
+
+                if(!islandExachangeDict[baseJobId][message.exchangeRound]){
+                    islandExachangeDict[baseJobId][message.exchangeRound] = {};
+                }
+
+                islandExachangeDict[baseJobId][message.exchangeRound][message.workerId] = message.bestCandidate;
                 console.log('Current exchange dict:', islandExachangeDict, 'And has length: ', Object.keys(islandExachangeDict[baseJobId]).length, '/n Expected: ', message.islandAmount);
-                if(islandExachangeDict[baseJobId] && Object.keys(islandExachangeDict[baseJobId]).length >= message.islandAmount){
+                if(islandExachangeDict[baseJobId][message.exchangeRound] && Object.keys(islandExachangeDict[baseJobId][message.exchangeRound]).length >= message.islandAmount){
                     console.log(`All best candidates received for job ${message.jobId}. Proceeding with exchange.`);
                     //Plan to exchange all best candidates to other islands in a ring topology
-                    const bestCandidates = Object.entries(islandExachangeDict[baseJobId]);
+                    const bestCandidates = Object.entries(islandExachangeDict[baseJobId][message.exchangeRound]);
                     for(let i = 0; i < bestCandidates.length; i++){
                         //Send a message to each of the islands with their new canadite
                         const [workerId, bestCandidate] = bestCandidates[i];
@@ -376,42 +400,48 @@ const server = createServer((socket) => {
                 const jobInfo = jobs.get(message.jobId);
                 if (jobInfo) {
                     jobInfo.status = JobStatus.RUNNING;
+                    if(jobInfo.groupJob){
+                        const groupJob = currentGroupJobs.find(group => group.associatedJobIds.includes(message.jobId));
+                        if(groupJob){
+                            groupJob.workerJobStatuses[message.workerId] = JobStatus.RUNNING;
+                        }
+                    }
                 }
             }
 
             if(message.type === "JOB_RESULT") {
                 console.log(`Received result for ${message.jobId}: ${message.result}`);
                 const jobInfo = jobs.get(message.jobId);
-                const baseJobId = message.jobId.replace(/-island-\d+$/, '');
+                const groupJob = currentGroupJobs.find(group => group.associatedJobIds.includes(message.jobId));
+                const baseJobId = groupJob?.groupJobId ?? message.jobId;
 
-                if (!jobInfo || (jobInfo.status === JobStatus.COMPLETED &&
-                    (!jobInfo.groupJob || !groupResultTimers.has(baseJobId)))) {
+                if (!jobInfo || jobInfo.status === JobStatus.COMPLETED) {
                     console.log(`Ignoring duplicate or unknown result for ${message.jobId}`);
                     continue;
                 }
 
                 //if group job. Complete group job and send message to all workers with the job that its been completed and they can stop
-                if (jobInfo && jobInfo.groupJob) {
+                if (groupJob && jobInfo.groupJob) {
                     delete islandExachangeDict[baseJobId];
-                    const results = groupResults.get(baseJobId) ?? [];
-                    results.push({ workerId: message.workerId, result: message.result });
-                    groupResults.set(baseJobId, results);
+                    groupJob.workerJobStatuses[message.workerId] = JobStatus.COMPLETED;
+                    groupJob.results[message.workerId] = message.result;
 
                     // Keep collecting results and start only one timer for this group
                     if (!groupResultTimers.has(baseJobId)) {
                         const timer = setTimeout(() => {
                             groupResultTimers.delete(baseJobId);
-                            const collectedResults = groupResults.get(baseJobId) ?? [];
-                            const groupJobs = [...jobs.entries()].filter(([, participant]) =>
-                                participant.groupJob && participant.jobId.startsWith(`${baseJobId}-`)
-                            );
-                            const bestResult = collectedResults.reduce<{ workerId: string; result: number } | undefined>(
-                                (best, current) => !best || current.result > best.result ? current : best,
+                            const groupJobs = groupJob.associatedJobIds
+                                .map(participantId => [participantId, jobs.get(participantId)] as const)
+                                .filter((entry): entry is readonly [string, JobInfo] => entry[1] !== undefined);
+                            const bestResult = Object.entries(groupJob.results).reduce<{ workerId: string; result: number } | undefined>(
+                                (best, [workerId, result]) => typeof result === "number" && (!best || result > best.result)
+                                    ? { workerId, result }
+                                    : best,
                                 undefined
                             );
 
                             for (const [participantId, participant] of groupJobs) {
-                                if (participant.status !== JobStatus.COMPLETED) {
+                                if (groupJob.workerJobStatuses[participant.assignedWorkerId ?? ""] !== JobStatus.COMPLETED) {
                                     const worker = workers.get(participant.assignedWorkerId ?? "");
                                     if (worker) {
                                         worker.socket.write(JSON.stringify({
@@ -420,12 +450,10 @@ const server = createServer((socket) => {
                                         }) + "\n");
                                     }
                                 }
+                                groupJob.workerJobStatuses[participant.assignedWorkerId ?? ""] = JobStatus.COMPLETED;
                                 participant.status = JobStatus.COMPLETED;
-                                participant.result = collectedResults.find(
-                                    result => result.workerId === participant.assignedWorkerId
-                                )?.result;
+                                participant.result = groupJob.results[participant.assignedWorkerId ?? ""];
                             }
-                            groupResults.delete(baseJobId);
 
                             if (bestResult) {
                                 const firstJob = groupJobs[0]?.[1];
@@ -436,7 +464,10 @@ const server = createServer((socket) => {
                                     workerId: bestResult.workerId
                                 }) + "\n");
                             }
+                            //Remove current group job from currentGroupJobs
+                            currentGroupJobs = currentGroupJobs.filter(group => group.groupJobId !== baseJobId);
                             delete islandExachangeDict[baseJobId];
+
 
                         }, GROUP_RESULT_WINDOW_MS);
 

@@ -3,6 +3,7 @@ import { createConnection } from "node:net";
 const workerId = process.argv[2] ?? "island-1";
 const jobsQueue: any[] = [];
 let currentJobId: string | null = null;
+const completedGroupJobs = new Set<string>();
 
 let heartbeat = true; //Debug Flag to sim failures
 
@@ -96,6 +97,7 @@ socket.on("data", (data) => { //Get any data from coordinator
 
             if(currentJobId === message.jobId){
                 console.log(`Group job ${message.jobId} completed. Stopping current job.`);
+                completedGroupJobs.add(message.jobId);
                 //Complete current job
                 if (currentJobId === message.jobId) {
                     currentJobId = null;
@@ -149,9 +151,11 @@ async function startNextJob(): Promise<void> {
 
     console.log(`Starting job: ${message.jobId}`);
 
-    let groupJobCompleted = false;
     const finishJob = (result: unknown): void => {
-        if (groupJobCompleted) return;
+        if (completedGroupJobs.has(message.jobId)) {
+            completedGroupJobs.delete(message.jobId);
+            return;
+        }
         const jobResult = {
             type: "JOB_RESULT",
             workerId,
@@ -190,7 +194,7 @@ async function startNextJob(): Promise<void> {
         );
         let bestCandidate = population[0];
 
-        for (let generation = 0; generation < genAmount && score(bestCandidate) < bitLength; generation++) {
+        for (let generation = 0; generation < genAmount && score(bestCandidate) < bitLength && !completedGroupJobs.has(message.jobId); generation++) {
             if(message.groupJob && generation > 0 && generation % (message.input?.exchangeRate ?? 3) === 0){
                 //Send best candidate to coordinator and wait for best candidates from other islands
                 console.log("Sending best candidate to coordinator for exchange");
@@ -206,12 +210,26 @@ async function startNextJob(): Promise<void> {
                     workerId,
                     jobId: message.jobId,
                     islandAmount: islandAmount,
+                    exchangeRound: generation / (message.input?.exchangeRate ?? 3),
                     bestCandidate
                 }) + "\n");
 
                 console.log("Waiting for best candidates from other islands...");
-                const newCandidate = await newCandidatePromise;
-                if (groupJobCompleted) return;
+
+                //Add a timeout to prevent waiting forever
+                const timeoutPromise = new Promise<string>((resolve) => {
+                    setTimeout(() => {
+                        console.log("Timeout reached while waiting for exchanged candidate.");
+                        resolve(bestCandidate); // Fallback to current best candidate
+                    }, 10000); // 10 second timeout
+                });
+
+                const newCandidate = await Promise.race([newCandidatePromise, timeoutPromise]);
+                if (completedGroupJobs.has(message.jobId)) {
+                    completedGroupJobs.delete(message.jobId);
+                    return;
+                }
+
                 bestCandidate = newCandidate; //swap out  best candidate with new candidate
                 console.log(`Generation ${generation + 1}: best ${bestCandidate}, score ${score(bestCandidate)}/${bitLength}`);
                 
@@ -222,8 +240,13 @@ async function startNextJob(): Promise<void> {
             );
             if (score(generationBest) > score(bestCandidate)) bestCandidate = generationBest;
             console.log(`Generation ${generation + 1}: best ${bestCandidate}, score ${score(bestCandidate)}/${bitLength}`);
+            await new Promise<void>(resolve => setImmediate(resolve));
         }
 
+        if (completedGroupJobs.has(message.jobId)) {
+            completedGroupJobs.delete(message.jobId);
+            return;
+        }
         setTimeout(() => finishJob(score(bestCandidate)), jobLength);
     }
 }
