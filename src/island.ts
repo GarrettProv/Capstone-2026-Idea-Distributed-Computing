@@ -12,6 +12,8 @@ let jobPopulationSize = 10;
 let waitingForExchange:
     | {
         jobId: string;
+        exchangeRound: number;
+        fallbackCandidate: string;
         resolve: (candidate: string) => void;
       }
     | undefined;
@@ -77,10 +79,18 @@ socket.on("data", (data) => { //Get any data from coordinator
         }
 
         if (message.type === "BEST_CANDIDATE_EXCHANGE" && waitingForExchange) {
-            if (message.jobId === waitingForExchange.jobId) {
+            if (message.jobId === waitingForExchange.jobId &&
+                message.exchangeRound === waitingForExchange.exchangeRound) {
                 waitingForExchange.resolve(message.newBestCandidate);
                 waitingForExchange = undefined;
             }
+        }
+
+        if (message.type === "EXCHANGE_CANCELLED" && waitingForExchange &&
+            message.jobId === waitingForExchange.jobId &&
+            message.exchangeRound === waitingForExchange.exchangeRound) {
+            waitingForExchange.resolve(waitingForExchange.fallbackCandidate);
+            waitingForExchange = undefined;
         }
 
         if (message.type === "DISCONNECT") {
@@ -98,27 +108,19 @@ socket.on("data", (data) => { //Get any data from coordinator
             if(currentJobId === message.jobId){
                 console.log(`Group job ${message.jobId} completed. Stopping current job.`);
                 completedGroupJobs.add(message.jobId);
-                //Complete current job
-                if (currentJobId === message.jobId) {
-                    currentJobId = null;
-                }
-                //Send coordinator a message that we completed the job
-                socket.write(JSON.stringify({
-                    type: "JOB_RESULT",
-                    workerId,
-                    jobId: message.jobId,
-                    result: "Group job completed"
-                }) + "\n");
-
+                currentJobId = null;
                 if (waitingForExchange?.jobId === message.jobId) {
-                    if(waitingForExchange){
-                        waitingForExchange.resolve("");
-                        waitingForExchange = undefined;
-                    }
-
+                    waitingForExchange.resolve(waitingForExchange.fallbackCandidate);
+                    waitingForExchange = undefined;
                 }
             }
+            socket.write(JSON.stringify({
+                type: "JOB_CANCELLED",
+                workerId,
+                jobId: message.jobId
+            }) + "\n");
             startNextJob();
+            sendHeartbeat();
         }
 
     }
@@ -198,9 +200,12 @@ async function startNextJob(): Promise<void> {
             if(message.groupJob && generation > 0 && generation % (message.input?.exchangeRate ?? 3) === 0){
                 //Send best candidate to coordinator and wait for best candidates from other islands
                 console.log("Sending best candidate to coordinator for exchange");
+                const exchangeRound = generation / (message.input?.exchangeRate ?? 3);
                 const newCandidatePromise = new Promise<string>((resolve) => {
                     waitingForExchange = {
                         jobId: message.jobId,
+                        exchangeRound,
+                        fallbackCandidate: bestCandidate,
                         resolve
                     };
                 });
@@ -209,22 +214,32 @@ async function startNextJob(): Promise<void> {
                     type: "EXCHANGE_BEST_CANDIDATE",
                     workerId,
                     jobId: message.jobId,
+                    groupJobId: message.groupJobId,
                     islandAmount: islandAmount,
-                    exchangeRound: generation / (message.input?.exchangeRate ?? 3),
+                    exchangeRound,
                     bestCandidate
                 }) + "\n");
 
                 console.log("Waiting for best candidates from other islands...");
 
                 //Add a timeout to prevent waiting forever
+                let exchangeTimeout: NodeJS.Timeout | undefined;
                 const timeoutPromise = new Promise<string>((resolve) => {
-                    setTimeout(() => {
+                    exchangeTimeout = setTimeout(() => {
                         console.log("Timeout reached while waiting for exchanged candidate.");
-                        resolve(bestCandidate); // Fallback to current best candidate
+                        if(waitingForExchange){
+                            if (waitingForExchange?.jobId === message.jobId &&
+                                    waitingForExchange.exchangeRound === exchangeRound) {
+                                waitingForExchange = undefined;
+                            }
+                            resolve(bestCandidate); // Fallback to current best candidate
+                        }
+                        
                     }, 10000); // 10 second timeout
                 });
 
                 const newCandidate = await Promise.race([newCandidatePromise, timeoutPromise]);
+                if (exchangeTimeout) clearTimeout(exchangeTimeout);
                 if (completedGroupJobs.has(message.jobId)) {
                     completedGroupJobs.delete(message.jobId);
                     return;

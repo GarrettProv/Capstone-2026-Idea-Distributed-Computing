@@ -28,6 +28,7 @@ type JobInfo = {
     input: unknown;
     result?: unknown;
     groupJob?: boolean; // Indicates if this job is part of a group job
+    cancelled?: boolean;
     developerSocket: Socket; //So i can track who asked for a job
 };
 
@@ -37,6 +38,7 @@ type GroupJobInfo = {
     associatedWorkerIds: string[];
     workerJobStatuses: Record<string, JobStatus>; // workerId -> JobStatus
     results: Record<string, any>; // workerId -> result
+    cancelledExchangeRounds: Set<number>;
 }
 
 const workers = new Map<string, WorkerInfo>();
@@ -44,9 +46,113 @@ const jobs = new Map<string, JobInfo>(); // jobId -> job information
 let currentGroupJobs: GroupJobInfo[] = []; //All current group jobs
 const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
 // JobId -> {ExchangeRound -> {WorkerId -> Offered Canadite}}
-let islandExachangeDict: Record<string, Record<number, Record<string, number>>> = {}
+let islandExachangeDict: Record<string, Record<number, Record<string, string>>> = {}
 const groupResultTimers = new Map<string, NodeJS.Timeout>();
 const GROUP_RESULT_WINDOW_MS = 10_000;
+
+function distributeExchangeRound(groupJob: GroupJobInfo, exchangeRound: number): boolean {
+    const roundCandidates = islandExachangeDict[groupJob.groupJobId]?.[exchangeRound];
+    if (!roundCandidates) return false;
+
+    const activeWorkerIds = groupJob.associatedWorkerIds.filter(workerId =>
+        groupJob.workerJobStatuses[workerId] === JobStatus.QUEUED ||
+        groupJob.workerJobStatuses[workerId] === JobStatus.RUNNING
+    );
+    if (activeWorkerIds.length === 0 || !activeWorkerIds.every(workerId => workerId in roundCandidates)) {
+        return false;
+    }
+
+    for (let i = 0; i < activeWorkerIds.length; i++) {
+        const workerId = activeWorkerIds[i];
+        const nextWorkerId = activeWorkerIds[(i + 1) % activeWorkerIds.length];
+        const nextParticipantIndex = groupJob.associatedWorkerIds.indexOf(nextWorkerId);
+        workers.get(nextWorkerId)?.socket.write(JSON.stringify({
+            type: "BEST_CANDIDATE_EXCHANGE",
+            jobId: groupJob.associatedJobIds[nextParticipantIndex],
+            exchangeRound,
+            newBestCandidate: roundCandidates[workerId]
+        }) + "\n");
+    }
+
+    delete islandExachangeDict[groupJob.groupJobId][exchangeRound];
+    if (Object.keys(islandExachangeDict[groupJob.groupJobId]).length === 0) {
+        delete islandExachangeDict[groupJob.groupJobId];
+    }
+    return true;
+}
+
+function failGroupParticipant(workerId: string): void {
+    for (const groupJob of currentGroupJobs) {
+        const status = groupJob.workerJobStatuses[workerId];
+        if (status !== JobStatus.QUEUED && status !== JobStatus.RUNNING) continue;
+
+        groupJob.workerJobStatuses[workerId] = JobStatus.FAILED;
+        const participantIndex = groupJob.associatedWorkerIds.indexOf(workerId);
+        const participantId = groupJob.associatedJobIds[participantIndex];
+        if (!participantId) continue;
+        const participantJob = jobs.get(participantId);
+        if (participantJob) participantJob.status = JobStatus.FAILED;
+
+        const replacement = [...workers.entries()]
+            .filter(([candidateId, candidate]) => candidate.status === "HEALTHY" &&
+                candidate.type === "island" && !groupJob.associatedWorkerIds.includes(candidateId))
+            .sort(([, a], [, b]) => a.numOfJobs - b.numOfJobs)[0];
+        if (replacement && participantJob) {
+            const [replacementId, replacementWorker] = replacement;
+            groupJob.associatedWorkerIds[participantIndex] = replacementId;
+            groupJob.workerJobStatuses[replacementId] = JobStatus.QUEUED;
+            participantJob.assignedWorkerId = replacementId;
+            participantJob.status = JobStatus.QUEUED;
+            replacementWorker.numOfJobs++;
+            replacementWorker.socket.write(JSON.stringify({
+                type: "RUN_JOB",
+                jobId: participantId,
+                groupJobId: groupJob.groupJobId,
+                kind: participantJob.kind,
+                groupJob: true,
+                input: participantJob.input
+            }) + "\n");
+            console.log(`Reassigned group participant ${participantId} from ${workerId} to ${replacementId}`);
+        }
+
+        const groupRounds = islandExachangeDict[groupJob.groupJobId];
+        for (const roundKey of Object.keys(groupRounds ?? {})) {
+            const exchangeRound = Number(roundKey);
+            if (distributeExchangeRound(groupJob, exchangeRound)) continue;
+
+            groupJob.cancelledExchangeRounds.add(exchangeRound);
+            const roundCandidates = groupRounds?.[exchangeRound] ?? {};
+            for (const waitingWorkerId of Object.keys(roundCandidates)) {
+                if (groupJob.workerJobStatuses[waitingWorkerId] !== JobStatus.FAILED) {
+                    workers.get(waitingWorkerId)?.socket.write(JSON.stringify({
+                        type: "EXCHANGE_CANCELLED",
+                        jobId: groupJob.associatedJobIds[groupJob.associatedWorkerIds.indexOf(waitingWorkerId)],
+                        exchangeRound
+                    }) + "\n");
+                }
+            }
+            if (groupRounds) delete groupRounds[exchangeRound];
+        }
+        if (groupRounds && Object.keys(groupRounds).length === 0) {
+            delete islandExachangeDict[groupJob.groupJobId];
+        }
+
+        if (groupJob.associatedWorkerIds.every(id => groupJob.workerJobStatuses[id] === JobStatus.FAILED) &&
+            Object.keys(groupJob.results).length === 0) {
+            const firstJob = jobs.get(groupJob.associatedJobIds[0]);
+            firstJob?.developerSocket.write(JSON.stringify({
+                type: "JOB_ERROR",
+                jobId: groupJob.groupJobId,
+                error: "All islands failed before returning a result"
+            }) + "\n");
+            const timer = groupResultTimers.get(groupJob.groupJobId);
+            if (timer) clearTimeout(timer);
+            groupResultTimers.delete(groupJob.groupJobId);
+            delete islandExachangeDict[groupJob.groupJobId];
+            currentGroupJobs = currentGroupJobs.filter(group => group !== groupJob);
+        }
+    }
+}
 
 async function writeWorkerSnapshot(): Promise<void> {
     const generatedAt = new Date();
@@ -282,7 +388,8 @@ const server = createServer((socket) => {
                         associatedJobIds: selectedIslands.map(([workerId]) => `${message.jobId}-${workerId}`),
                         associatedWorkerIds: selectedIslands.map(([workerId]) => workerId),
                         workerJobStatuses: Object.fromEntries(selectedIslands.map(([workerId]) => [workerId, JobStatus.QUEUED])),
-                        results: {}
+                        results: {},
+                        cancelledExchangeRounds: new Set()
                     });
 
                     //Send island group job to selected islands
@@ -301,6 +408,7 @@ const server = createServer((socket) => {
                         worker.socket.write(JSON.stringify({
                             type: "RUN_JOB",
                             jobId: `${message.jobId}-${workerId}`,
+                            groupJobId: message.jobId,
                             kind: message.kind,
                             groupJob: true,
                             input: message.input
@@ -355,44 +463,30 @@ const server = createServer((socket) => {
 
             if(message.type === "EXCHANGE_BEST_CANDIDATE"){
                 console.log(`Received best candidate exchange for job ${message.jobId} from worker ${message.workerId}: ${message.bestCandidate}`);
-                // Job IDs are in the form: 'job-1791557525841-atkxi-island-2' 
-                //Need to strip the island-2 off the end
-                const baseJobId = message.jobId.replace(/-island-\d+$/, '');
-
-                if(!islandExachangeDict[baseJobId]){
-                    islandExachangeDict[baseJobId] = {};
+                const groupJob = currentGroupJobs.find(group => group.groupJobId === message.groupJobId);
+                if (!groupJob || !groupJob.associatedWorkerIds.includes(message.workerId) ||
+                    groupJob.workerJobStatuses[message.workerId] === JobStatus.FAILED ||
+                    groupJob.workerJobStatuses[message.workerId] === JobStatus.COMPLETED) {
+                    continue;
                 }
 
-                if(!islandExachangeDict[baseJobId][message.exchangeRound]){
-                    islandExachangeDict[baseJobId][message.exchangeRound] = {};
+                if (groupJob.cancelledExchangeRounds.has(message.exchangeRound)) {
+                    socket.write(JSON.stringify({
+                        type: "EXCHANGE_CANCELLED",
+                        jobId: message.jobId,
+                        exchangeRound: message.exchangeRound
+                    }) + "\n");
+                    continue;
                 }
 
-                islandExachangeDict[baseJobId][message.exchangeRound][message.workerId] = message.bestCandidate;
-                console.log('Current exchange dict:', islandExachangeDict, 'And has length: ', Object.keys(islandExachangeDict[baseJobId]).length, '/n Expected: ', message.islandAmount);
-                if(islandExachangeDict[baseJobId][message.exchangeRound] && Object.keys(islandExachangeDict[baseJobId][message.exchangeRound]).length >= message.islandAmount){
-                    console.log(`All best candidates received for job ${message.jobId}. Proceeding with exchange.`);
-                    //Plan to exchange all best candidates to other islands in a ring topology
-                    const bestCandidates = Object.entries(islandExachangeDict[baseJobId][message.exchangeRound]);
-                    for(let i = 0; i < bestCandidates.length; i++){
-                        //Send a message to each of the islands with their new canadite
-                        const [workerId, bestCandidate] = bestCandidates[i];
-                        const nextIslandIndex = (i + 1) % bestCandidates.length;
-                        const [nextWorkerId, nextBestCandidate] = bestCandidates[nextIslandIndex];
-                        const worker = workers.get(nextWorkerId);
-                        
-                        if(worker){
-                            worker.socket.write(JSON.stringify({
-                                type: "BEST_CANDIDATE_EXCHANGE",
-                                jobId: baseJobId + "-" + nextWorkerId,
-                                newBestCandidate: bestCandidate
-                            }) + "\n");
-                        }
+                if (!islandExachangeDict[groupJob.groupJobId]) islandExachangeDict[groupJob.groupJobId] = {};
+                if (!islandExachangeDict[groupJob.groupJobId][message.exchangeRound]) {
+                    islandExachangeDict[groupJob.groupJobId][message.exchangeRound] = {};
+                }
+                islandExachangeDict[groupJob.groupJobId][message.exchangeRound][message.workerId] = message.bestCandidate;
 
-
-                        //Clear exchange dict for this job
-                        delete islandExachangeDict[baseJobId];
-
-                    }
+                if (distributeExchangeRound(groupJob, message.exchangeRound)) {
+                    console.log(`All active islands supplied candidates for ${groupJob.groupJobId}, round ${message.exchangeRound}.`);
                 }
             }
 
@@ -415,14 +509,13 @@ const server = createServer((socket) => {
                 const groupJob = currentGroupJobs.find(group => group.associatedJobIds.includes(message.jobId));
                 const baseJobId = groupJob?.groupJobId ?? message.jobId;
 
-                if (!jobInfo || jobInfo.status === JobStatus.COMPLETED) {
+                if (!jobInfo || jobInfo.status === JobStatus.COMPLETED || jobInfo.status === JobStatus.FAILED) {
                     console.log(`Ignoring duplicate or unknown result for ${message.jobId}`);
                     continue;
                 }
 
                 //if group job. Complete group job and send message to all workers with the job that its been completed and they can stop
                 if (groupJob && jobInfo.groupJob) {
-                    delete islandExachangeDict[baseJobId];
                     groupJob.workerJobStatuses[message.workerId] = JobStatus.COMPLETED;
                     groupJob.results[message.workerId] = message.result;
 
@@ -441,6 +534,10 @@ const server = createServer((socket) => {
                             );
 
                             for (const [participantId, participant] of groupJobs) {
+                                if (groupJob.workerJobStatuses[participant.assignedWorkerId ?? ""] === JobStatus.FAILED) {
+                                    participant.status = JobStatus.FAILED;
+                                    continue;
+                                }
                                 if (groupJob.workerJobStatuses[participant.assignedWorkerId ?? ""] !== JobStatus.COMPLETED) {
                                     const worker = workers.get(participant.assignedWorkerId ?? "");
                                     if (worker) {
@@ -449,19 +546,26 @@ const server = createServer((socket) => {
                                             jobId: participantId
                                         }) + "\n");
                                     }
+                                    groupJob.workerJobStatuses[participant.assignedWorkerId ?? ""] = JobStatus.FAILED;
+                                    participant.status = JobStatus.FAILED;
+                                    continue;
                                 }
-                                groupJob.workerJobStatuses[participant.assignedWorkerId ?? ""] = JobStatus.COMPLETED;
-                                participant.status = JobStatus.COMPLETED;
                                 participant.result = groupJob.results[participant.assignedWorkerId ?? ""];
                             }
 
+                            const developerSocket = groupJobs[0]?.[1].developerSocket;
                             if (bestResult) {
-                                const firstJob = groupJobs[0]?.[1];
-                                firstJob?.developerSocket.write(JSON.stringify({
+                                developerSocket?.write(JSON.stringify({
                                     type: "JOB_RESULT",
                                     jobId: baseJobId,
                                     result: bestResult.result,
                                     workerId: bestResult.workerId
+                                }) + "\n");
+                            } else {
+                                developerSocket?.write(JSON.stringify({
+                                    type: "JOB_ERROR",
+                                    jobId: baseJobId,
+                                    error: "No island returned a numeric result"
                                 }) + "\n");
                             }
                             //Remove current group job from currentGroupJobs
@@ -507,6 +611,21 @@ const server = createServer((socket) => {
                 }   
 
                 
+            }
+
+            if (message.type === "JOB_CANCELLED") {
+                const jobInfo = jobs.get(message.jobId);
+                if (!jobInfo || jobInfo.cancelled || jobInfo.assignedWorkerId !== message.workerId) continue;
+
+                jobInfo.cancelled = true;
+                if (jobInfo.status !== JobStatus.COMPLETED) jobInfo.status = JobStatus.FAILED;
+                const worker = workers.get(message.workerId);
+                if (worker) {
+                    worker.lastSeen = Date.now();
+                    if (worker.currentJobId === message.jobId) worker.currentJobId = null;
+                    worker.numOfJobs = Math.max(0, worker.numOfJobs - 1);
+                }
+                continue;
             }
 
             if(message.type === "SIMULATE_FAILURE"){
@@ -565,6 +684,7 @@ const server = createServer((socket) => {
             const worker = workers.get(registeredWorkerId);
 
             if (worker?.socket === socket) {
+                failGroupParticipant(registeredWorkerId);
                 workers.delete(registeredWorkerId);
 
                 console.log(`Removed worker: ${registeredWorkerId}`);
@@ -607,6 +727,7 @@ server.listen(3000, "127.0.0.1", () => {
                             }) + "\n"
                         );
                         
+                        failGroupParticipant(workerId);
                         workers.delete(workerId);
                         worker.socket.destroy();
                     }
@@ -617,7 +738,7 @@ server.listen(3000, "127.0.0.1", () => {
                 if(worker.numOfJobs > 0){
                     //Reasign jobs from the unhealthy worker to healthy workers
                     for(const [jobId, jobInfo] of jobs.entries()){
-                        if(jobInfo.assignedWorkerId === workerId && jobInfo.status !== JobStatus.COMPLETED){
+                        if(jobInfo.assignedWorkerId === workerId && jobInfo.status !== JobStatus.COMPLETED && !jobInfo.groupJob){
                             console.log(`Reassigning job ${jobId} from unhealthy worker ${workerId}`);
                             // Find a healthy worker to reassign the job to
                             const healthyWorkerEntry = [...workers.entries()]
