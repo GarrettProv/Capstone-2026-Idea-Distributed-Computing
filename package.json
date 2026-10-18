@@ -10,6 +10,7 @@
     "worker": "npx tsx src/worker.ts",
     "developer": "npx tsx src/developer.ts",
     "island": "npx tsx src/island.ts",
+    "test:integration": "jest --runInBand",
     "start-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-cluster.ps1",
     "start-island-cluster": "powershell -ExecutionPolicy Bypass -File ./scripts/start-island-cluster.ps1"
   },
@@ -18,6 +19,8 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1"
+    "@types/node": "^26.5.1",
+    "jest": "^30.5.2",
+    "tsx": "^4.23.15"
   }
 }

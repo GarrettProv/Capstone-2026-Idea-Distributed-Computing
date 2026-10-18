@@ -109,10 +109,13 @@ socket.on("data", (data) => { //Get any data from coordinator
                 console.log(`Group job ${message.jobId} completed. Stopping current job.`);
                 completedGroupJobs.add(message.jobId);
                 currentJobId = null;
-                if (waitingForExchange?.jobId === message.jobId) {
-                    waitingForExchange.resolve(waitingForExchange.fallbackCandidate);
-                    waitingForExchange = undefined;
+                if(waitingForExchange){
+                    if (waitingForExchange?.jobId === message.jobId) {
+                        waitingForExchange.resolve(waitingForExchange.fallbackCandidate);
+                        waitingForExchange = undefined;
+                    }
                 }
+
             }
             socket.write(JSON.stringify({
                 type: "JOB_CANCELLED",

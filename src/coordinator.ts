@@ -49,6 +49,7 @@ const WORKER_STATE_FILE = resolve(process.cwd(), "worker-state.txt");
 let islandExachangeDict: Record<string, Record<number, Record<string, string>>> = {}
 const groupResultTimers = new Map<string, NodeJS.Timeout>();
 const GROUP_RESULT_WINDOW_MS = 10_000;
+const coordinatorPort = Number(process.env.COORDINATOR_PORT ?? 3000);
 
 function distributeExchangeRound(groupJob: GroupJobInfo, exchangeRound: number): boolean {
     const roundCandidates = islandExachangeDict[groupJob.groupJobId]?.[exchangeRound];
@@ -697,8 +698,8 @@ const server = createServer((socket) => {
     });
 });
 
-server.listen(3000, "127.0.0.1", () => {
-    console.log("Coordinator listening on port 3000");
+server.listen(coordinatorPort, "127.0.0.1", () => {
+    console.log(`Coordinator listening on port ${coordinatorPort}`);
 
     void writeWorkerSnapshot();
     setInterval(() => {
@@ -760,6 +761,7 @@ server.listen(3000, "127.0.0.1", () => {
                             }
                         }
                     }
+                    
                 }
             }
         }
