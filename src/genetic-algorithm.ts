@@ -75,7 +75,7 @@ export function isPermutationRepresentation(
         }
     }
     constraints: [
-        "Sum(X[i] * weights[i]) <= capacity"
+        "Sum(X[i] * weights[i]) <= capacity" this means sum of all canadites is in the capacity
     ]
     objectives: {
         direction: max
