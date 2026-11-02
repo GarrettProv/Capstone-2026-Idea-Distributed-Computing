@@ -20,6 +20,8 @@ export type Expression =
     | { type: "equal"; left: Expression; right: Expression };
     //Will add more but for the time now this is good enough
 
+type ParsedSubExpression = Token | Expression | ParsedSubExpression[];
+
 const operationLevel: Record<string, number> = {
     "<": 1,
     ">": 1,
@@ -56,31 +58,37 @@ const operationLevel: Record<string, number> = {
 */
 
 
-export function parseConstraints(constraints: string[]): Expression[]{
-    return constraints.map(constraint => {
-        const tokens = tokenize(constraint);
+export function parseConstraints(constraints: string[]){
+    const tokens = tokenize(constraints[0]); //Set to one thing rn for testing
         // Next: parse these tokens into an Expression tree.
-        return parseExpression(tokens);
-    });
+    return parseExpression(tokens);
 }
 
 
-function parseExpression(tokens: Token[]): Expression{
-    let splitTokens = splitTokensByOperations;
-    for (let i = 0; i < tokens.length; i++) {
-        if(tokens[i].type === "identifier"){
-            if(tokens[i+1].type === "punctuation" && tokens[i+1].value === "("){
-                //We know this identifier is in the form of a function 
-                let j = i + 2;
-                let functionTokenList: Token[] = [];
-                while(tokens[j].value != ")"){
-                    functionTokenList.push(tokens[j]);
-                    j++;
-                }
-                return(parseFunction(tokens[i], parseExpression(functionTokenList)));
+function parseExpression(tokens: Token[]){ //Will Change Return
+    const splitTokens = splitTokensByLevel3Operations(
+        splitTokensByLevel2Operations(
+            splitTokensByLevel1Operations(tokens)
+        )
+    );
+
+    return parseSubExpression(splitTokens);
+}
+
+function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpression {
+    if (!Array.isArray(input)) {
+        if (input.type === "number") {
+            return {
+                type: "number",
+                value: Number(input.value)
             }
-            //TODO error handling if function not set up correctly
+        } else {
+            // TODO: Convert non-number tokens into AST expressions.
+            return input;
         }
+    } else {
+        // TODO: Combine the parsed operands and operators into an AST node.
+        return input.map(part => parseSubExpression(part));
     }
 }
 
@@ -163,6 +171,9 @@ export function splitTokensByLevel1Operations(tokens: Token[]): Token[][]{
             level1OperationIndex = i;
         }
     } //TODO add error handling for more then 1 level 1 operation
+    if(level1OperationCount === 0){
+        return [tokens];
+    }
     for(let i = 0; i < tokens.length; i++){
         if(i < level1OperationIndex){
             final[0][i] = {

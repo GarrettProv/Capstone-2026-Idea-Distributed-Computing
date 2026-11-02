@@ -138,7 +138,7 @@ afterEach(async () => {
     tempDir = undefined;
 });
 
-test("returns the best received score when one group island misses the result window", async () => {
+test("returns the best received score when one2 group island misses the result window", async () => {
     const islands = await Promise.all([
         connectClient("test-island-1", "island"),
         connectClient("test-island-2", "island")
