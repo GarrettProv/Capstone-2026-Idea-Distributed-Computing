@@ -7,6 +7,7 @@ export type Token =
     | { type: "operator"; value: string }
     | { type: "punctuation"; value: string }
     | { type: "call"; value: string}
+    | { type: "indexToken"; value: string}
 
 export type NestedTokenArray = Token | NestedTokenArray[];
 
@@ -19,6 +20,8 @@ export type Expression =
     | { type: "divide"; left: Expression; right: Expression }
     | { type: "add"; left: Expression; right: Expression }
     | { type: "subtract"; left: Expression; right: Expression }
+    | { type: "lessThan"; left: Expression; right: Expression }
+    | { type: "greaterThan"; left: Expression; right: Expression }
     | { type: "lessThanOrEqual"; left: Expression; right: Expression }
     | { type: "greaterThanOrEqual"; left: Expression; right: Expression }
     | { type: "equal"; left: Expression; right: Expression };
@@ -32,6 +35,7 @@ const operationLevel: Record<string, number> = {
     ">=": 1,
     "<=": 1,
     "=": 1,
+    "==": 1,
 
     "+": 2,
     "-": 2,
@@ -94,6 +98,16 @@ function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpr
                 type: "variable",
                 name: input.value
             }
+        } else if(input.type === "indexToken") {
+            const openBracket = input.value.indexOf("[");
+            const collectionText = input.value.slice(0, openBracket);
+            const indexText = input.value.slice(openBracket + 1, -1);
+
+            return {
+                type: "index",
+                collection: parseExpression(tokenize(collectionText)) as Expression,
+                index: parseExpression(tokenize(indexText)) as Expression
+            };
         } else if(input.type === "operator") {
             if(input.value === "*") {
                 return input; //Placeholder
@@ -141,8 +155,16 @@ function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpr
                     result = { type: "subtract", left: result, right };
                 } else if (operator.value === "/") {
                     result = { type: "divide", left: result, right };
+                } else if (operator.value === "<") {
+                    result = { type: "lessThan", left: result, right };
+                } else if (operator.value === ">") {
+                    result = { type: "greaterThan", left: result, right };
+                } else if (operator.value === "<=") {
+                    result = { type: "lessThanOrEqual", left: result, right };
                 } else if (operator.value === ">=") {
                     result = { type: "greaterThanOrEqual", left: result, right };
+                } else if (operator.value === "==" || operator.value === "=") {
+                    result = { type: "equal", left: result, right };
                 } else {
                     return parsedParts;
                 }
@@ -171,6 +193,8 @@ function isExpression(value: ParsedSubExpression): value is Expression {
         case "lessThanOrEqual": return "left" in value && "right" in value;
         case "add": return "left" in value && "right" in value;
         case "subtract": return "left" in value && "right" in value;
+        case "lessThan": return "left" in value && "right" in value;
+        case "greaterThan": return "left" in value && "right" in value;
         case "greaterThanOrEqual": return "left" in value && "right" in value;
         case "equal": return "left" in value && "right" in value;
         default: return false;
@@ -252,8 +276,8 @@ export function combineFunctionOperationsFromTokenize(tokens: Token[]): Token[]{
     let combinedTokens: Token[] = [];
     let currentIndex = 0;
     for(let i = 0; i < tokens.length; i++){
-        if(tokens[i].type === "identifier" && tokens[i+1] && (tokens[i+1].value === "(" || tokens[i+1].value === "[")){
-            //Must be some sort of function or some index value
+        if(tokens[i].type === "identifier" && tokens[i+1]?.value === "("){
+            // Combine a function name and its parenthesized argument.
             if(combinedTokens[currentIndex] && combinedTokens[currentIndex].type === "call"){
                 combinedTokens[currentIndex].value += tokens[i].value;
             }
@@ -265,20 +289,24 @@ export function combineFunctionOperationsFromTokenize(tokens: Token[]): Token[]{
             }
 
             i++;
-            if(tokens[i].value === "("){
-                while(tokens[i].value != ")"){
-                    combinedTokens[currentIndex].value += tokens[i].value;
-                    i++;
-                }
-            } else {
-                while(tokens[i].value != "]"){
-                    combinedTokens[currentIndex].value += tokens[i].value;
-                    i++;
-                }
+            while(tokens[i].value != ")"){
+                combinedTokens[currentIndex].value += tokens[i].value;
+                i++;
             }
 
 
             combinedTokens[currentIndex].value += tokens[i].value;
+            currentIndex++;
+
+        } else if(tokens[i].type === "identifier" && tokens[i+1]?.value === "["){
+            let value = tokens[i].value + tokens[i + 1].value;
+            i += 2;
+            while(tokens[i].value !== "]"){
+                value += tokens[i].value;
+                i++;
+            }
+            value += tokens[i].value;
+            combinedTokens[currentIndex] = { type: "indexToken", value };
             currentIndex++;
 
         } else {
@@ -296,7 +324,7 @@ export function combineFunctionOperationsFromTokenize(tokens: Token[]): Token[]{
 
 //Splits stuff into tokens to parse
 export function tokenize(input: string): Token[] {
-    const pattern = /\s*(<=|>=|==|[A-Za-z_]\w*|\d+(?:\.\d+)?|[()+\-*/[\],])\s*/gy;
+    const pattern = /\s*(<=|>=|==|[<>=]|[A-Za-z_]\w*|\d+(?:\.\d+)?|[()+\-*/[\],])\s*/gy;
     const tokens: Token[] = [];
     let position = 0;
 

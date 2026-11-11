@@ -3,7 +3,7 @@ import { tokenize, parseConstraints, combineFunctionOperationsFromTokenize, spli
 const bracketColors = ["\x1b[36m", "\x1b[33m", "\x1b[35m", "\x1b[32m"];
 const resetColor = "\x1b[0m";
 
-const string = "Sum(X/10)>= 0";
+const string = "Sum(X[i] * weights[i]) >= capacity";
 const tokens = tokenize(string);
 const combinedTokens = combineFunctionOperationsFromTokenize(tokens);
 const level1 = splitTokensByLevel1Operations(combinedTokens);
