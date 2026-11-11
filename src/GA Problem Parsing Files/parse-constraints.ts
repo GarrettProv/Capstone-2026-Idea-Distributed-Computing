@@ -16,7 +16,9 @@ export type Expression =
     | { type: "index"; collection: Expression; index: Expression }
     | { type: "call"; name: string; argument: Expression }
     | { type: "multiply"; left: Expression; right: Expression }
+    | { type: "divide"; left: Expression; right: Expression }
     | { type: "add"; left: Expression; right: Expression }
+    | { type: "subtract"; left: Expression; right: Expression }
     | { type: "lessThanOrEqual"; left: Expression; right: Expression }
     | { type: "greaterThanOrEqual"; left: Expression; right: Expression }
     | { type: "equal"; left: Expression; right: Expression };
@@ -70,7 +72,9 @@ export function parseConstraints(constraints: string[]){
 function parseExpression(tokens: Token[]){ //Will Change Return
     const splitTokens = splitTokensByLevel3Operations(
         splitTokensByLevel2Operations(
-            splitTokensByLevel1Operations(tokens)
+            splitTokensByLevel1Operations(
+                combineFunctionOperationsFromTokenize(tokens)
+            )
         )
     );
 
@@ -94,6 +98,19 @@ function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpr
             if(input.value === "*") {
                 return input; //Placeholder
             }
+        } else if (input.type === "call" && "value" in input) {
+            const openParen = input.value.indexOf("(");
+            const name = input.value.slice(0, openParen);
+            const argumentText = input.value.slice(openParen + 1, -1);
+
+            const argumentTokens = tokenize(argumentText);
+            const argument = parseExpression(argumentTokens);
+
+            return {
+                type: "call",
+                name,
+                argument: argument as Expression
+            };
         } else {
             return input; // Return the token as is for operators and punctuation.
         }
@@ -105,34 +122,33 @@ function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpr
             return parsedParts[0];
         }
 
-        // First WIP operator case: combine a three-part multiplication group.
-        if (parsedParts.length === 3) {
-            const [left, operator, right] = parsedParts;
-            if (
-                isExpression(left) &&
-                !Array.isArray(operator) &&
-                operator.type === "operator" &&
-                operator.value === "*" &&
-                isExpression(right)
-            ) {
-                return { type: "multiply", left, right };
-            } else if(
-                isExpression(left) &&
-                !Array.isArray(operator) &&
-                operator.type === "operator" &&
-                operator.value === "+" &&
-                isExpression(right)
-            ){
-                return { type: "add", left, right };
-            } else if(
-                isExpression(left) &&
-                !Array.isArray(operator) &&
-                operator.type === "operator" &&
-                operator.value === ">=" &&
-                isExpression(right)
-            ){
-                return { type: "greaterThanOrEqual", left, right };
+        // Combine alternating operand/operator groups from left to right.
+        if (parsedParts.length >= 3 && parsedParts.length % 2 === 1 && isExpression(parsedParts[0])) {
+            let result = parsedParts[0];
+
+            for (let i = 1; i < parsedParts.length; i += 2) {
+                const operator = parsedParts[i];
+                const right = parsedParts[i + 1];
+                if (Array.isArray(operator) || operator.type !== "operator" || !isExpression(right)) {
+                    return parsedParts;
+                }
+
+                if (operator.value === "*") {
+                    result = { type: "multiply", left: result, right };
+                } else if (operator.value === "+") {
+                    result = { type: "add", left: result, right };
+                } else if (operator.value === "-") {
+                    result = { type: "subtract", left: result, right };
+                } else if (operator.value === "/") {
+                    result = { type: "divide", left: result, right };
+                } else if (operator.value === ">=") {
+                    result = { type: "greaterThanOrEqual", left: result, right };
+                } else {
+                    return parsedParts;
+                }
             }
+
+            return result;
         }
 
         // TODO: Combine addition, division, and comparison groups.
@@ -151,8 +167,10 @@ function isExpression(value: ParsedSubExpression): value is Expression {
         case "index": return "collection" in value;
         case "call": return "name" in value && "argument" in value;
         case "multiply":
+        case "divide":
         case "lessThanOrEqual": return "left" in value && "right" in value;
         case "add": return "left" in value && "right" in value;
+        case "subtract": return "left" in value && "right" in value;
         case "greaterThanOrEqual": return "left" in value && "right" in value;
         case "equal": return "left" in value && "right" in value;
         default: return false;
