@@ -16,7 +16,9 @@ export type Expression =
     | { type: "index"; collection: Expression; index: Expression }
     | { type: "call"; name: string; argument: Expression }
     | { type: "multiply"; left: Expression; right: Expression }
+    | { type: "add"; left: Expression; right: Expression }
     | { type: "lessThanOrEqual"; left: Expression; right: Expression }
+    | { type: "greaterThanOrEqual"; left: Expression; right: Expression }
     | { type: "equal"; left: Expression; right: Expression };
     //Will add more but for the time now this is good enough
 
@@ -76,19 +78,84 @@ function parseExpression(tokens: Token[]){ //Will Change Return
 }
 
 function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpression {
+    console.log("\n\nParsing SubExpression:", input);
     if (!Array.isArray(input)) {
         if (input.type === "number") {
             return {
                 type: "number",
                 value: Number(input.value)
             }
+        } else if(input.type === "identifier") {
+            return {
+                type: "variable",
+                name: input.value
+            }
+        } else if(input.type === "operator") {
+            if(input.value === "*") {
+                return input; //Placeholder
+            }
         } else {
-            // TODO: Convert non-number tokens into AST expressions.
-            return input;
+            return input; // Return the token as is for operators and punctuation.
         }
     } else {
-        // TODO: Combine the parsed operands and operators into an AST node.
-        return input.map(part => parseSubExpression(part));
+        const parsedParts = input.map(part => parseSubExpression(part));
+
+        // Unwrap a group containing just one parsed item, such as [B].
+        if (parsedParts.length === 1) {
+            return parsedParts[0];
+        }
+
+        // First WIP operator case: combine a three-part multiplication group.
+        if (parsedParts.length === 3) {
+            const [left, operator, right] = parsedParts;
+            if (
+                isExpression(left) &&
+                !Array.isArray(operator) &&
+                operator.type === "operator" &&
+                operator.value === "*" &&
+                isExpression(right)
+            ) {
+                return { type: "multiply", left, right };
+            } else if(
+                isExpression(left) &&
+                !Array.isArray(operator) &&
+                operator.type === "operator" &&
+                operator.value === "+" &&
+                isExpression(right)
+            ){
+                return { type: "add", left, right };
+            } else if(
+                isExpression(left) &&
+                !Array.isArray(operator) &&
+                operator.type === "operator" &&
+                operator.value === ">=" &&
+                isExpression(right)
+            ){
+                return { type: "greaterThanOrEqual", left, right };
+            }
+        }
+
+        // TODO: Combine addition, division, and comparison groups.
+        return parsedParts;
+    }
+
+    return input; // Fallback return for unhandled cases.
+}
+
+function isExpression(value: ParsedSubExpression): value is Expression {
+    if (Array.isArray(value)) return false;
+
+    switch (value.type) {
+        case "number": return typeof value.value === "number";
+        case "variable": return "name" in value;
+        case "index": return "collection" in value;
+        case "call": return "name" in value && "argument" in value;
+        case "multiply":
+        case "lessThanOrEqual": return "left" in value && "right" in value;
+        case "add": return "left" in value && "right" in value;
+        case "greaterThanOrEqual": return "left" in value && "right" in value;
+        case "equal": return "left" in value && "right" in value;
+        default: return false;
     }
 }
 
@@ -118,53 +185,34 @@ export function splitTokensByLevel3Operations(tokens: NestedTokenArray): NestedT
     return tokens.map(token => splitTokensByLevel3Operations(token));
 }
 
-export function splitTokensByLevel2Operations(tokens: Token[][]): NestedTokenArray{
+export function splitTokensByLevel2Operations(tokens: (Token[] | Token)[]): NestedTokenArray{
     let final: NestedTokenArray[] = [];
-    let level2OperationIndexs: number[][] = [];
-    for(let i = 0; i < tokens.length; i++){
-        let counter = 0;
-        for(let j = 0; j < tokens[i].length; j++){
-            if(operationLevel[tokens[i][j].value] && operationLevel[tokens[i][j].value] == 2){
-                if(level2OperationIndexs[i]){
-                    level2OperationIndexs[i][counter] = j;
-                } else {
-                    level2OperationIndexs[i] = [];
-                    level2OperationIndexs[i][counter] = j;
-                }
-
-                counter ++;
-            }
+    for (const part of tokens) {
+        if (!Array.isArray(part)) {
+            final.push(part);
+            continue;
         }
-    }
 
-    for(let i = 0; i < tokens.length; i++){
-        let row: NestedTokenArray[] = [];
+        const row: NestedTokenArray[] = [];
         let group: Token[] = [];
-        let operationIndex = 0;
-        for(let j = 0; j < tokens[i].length; j++){
-            const token = tokens[i][j];
-            if(level2OperationIndexs[i]?.[operationIndex] === j){
-                row.push(group);
+        for (const token of part) {
+            if (operationLevel[token.value] === 2) {
+                row.push(group, [token]);
                 group = [];
-                row.push([token]);
-                operationIndex++;
             } else {
                 group.push(token);
             }
         }
-        if(group.length > 0) row.push(group);
-        final[i] = row;
+        if (group.length > 0) row.push(group);
+        final.push(row);
     }
 
     return final;
-
-
 }
 
-export function splitTokensByLevel1Operations(tokens: Token[]): Token[][]{
+export function splitTokensByLevel1Operations(tokens: Token[]): (Token[] | Token)[]{
     let level1OperationCount = 0;
     let level1OperationIndex = 0;
-    let final: Token[][] = [[],[],[]];
     for(let i = 0; i < tokens.length; i++){
         if(operationLevel[tokens[i].value] && operationLevel[tokens[i].value] == 1){
             level1OperationCount++;
@@ -174,25 +222,11 @@ export function splitTokensByLevel1Operations(tokens: Token[]): Token[][]{
     if(level1OperationCount === 0){
         return [tokens];
     }
-    for(let i = 0; i < tokens.length; i++){
-        if(i < level1OperationIndex){
-            final[0][i] = {
-                type: tokens[i].type,
-                value: tokens[i].value
-            }
-        } else if(i == level1OperationIndex){
-            final[1][0] = {
-                type: tokens[i].type,
-                value: tokens[i].value
-            }
-        } else {
-            final[2][i - level1OperationIndex - 1] = {
-                type: tokens[i].type,
-                value: tokens[i].value
-            }
-        }
-    }
-    return final;
+    return [
+        tokens.slice(0, level1OperationIndex),
+        tokens[level1OperationIndex],
+        tokens.slice(level1OperationIndex + 1)
+    ];
 
 }
 
