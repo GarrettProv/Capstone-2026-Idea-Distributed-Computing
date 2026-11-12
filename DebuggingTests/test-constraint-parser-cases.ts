@@ -7,8 +7,15 @@ const cases = [
     "A / B > 2",
     "A < B",
     "A == B",
+    "-3 >= A",
+    "-A * B >= 0",
+    "A + -B >= 0",
+    "A - -B >= 0",
     "Sum(X)",
-    "Sum(X[i] * weights[i]) >= capacity"
+    "Sum(X[i] * weights[i]) >= capacity",
+    "Sum(Sum(X)) >= 0",
+    "Sum(X[i[j]]) >= 0",
+    "Sum(X[i][j]) >= 0"
 ];
 
 for (const input of cases) {

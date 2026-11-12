@@ -6,6 +6,7 @@ export type Token =
     | { type: "number"; value: string }
     | { type: "operator"; value: string }
     | { type: "punctuation"; value: string }
+    | { type: "unaryOperator"; value: "-" }
     | { type: "call"; value: string}
     | { type: "indexToken"; value: string}
 
@@ -20,6 +21,7 @@ export type Expression =
     | { type: "divide"; left: Expression; right: Expression }
     | { type: "add"; left: Expression; right: Expression }
     | { type: "subtract"; left: Expression; right: Expression }
+    | { type: "negate"; operand: Expression }
     | { type: "lessThan"; left: Expression; right: Expression }
     | { type: "greaterThan"; left: Expression; right: Expression }
     | { type: "lessThanOrEqual"; left: Expression; right: Expression }
@@ -99,19 +101,29 @@ function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpr
                 name: input.value
             }
         } else if(input.type === "indexToken") {
-            const openBracket = input.value.indexOf("[");
-            const collectionText = input.value.slice(0, openBracket);
-            const indexText = input.value.slice(openBracket + 1, -1);
+            const indexTokens = tokenize(input.value);
+            const firstBracket = indexTokens.findIndex(token => token.value === "[");
+            let collection = parseExpression(indexTokens.slice(0, firstBracket)) as Expression;
+            let bracketPosition = firstBracket;
 
-            return {
-                type: "index",
-                collection: parseExpression(tokenize(collectionText)) as Expression,
-                index: parseExpression(tokenize(indexText)) as Expression
-            };
+            while (bracketPosition < indexTokens.length) {
+                const bracketGroup = readDelimitedTokens(indexTokens, bracketPosition, "[", "]");
+                const indexText = bracketGroup.text.slice(1, -1);
+                collection = {
+                    type: "index",
+                    collection,
+                    index: parseExpression(tokenize(indexText)) as Expression
+                };
+                bracketPosition = bracketGroup.closeIndex + 1;
+            }
+
+            return collection;
         } else if(input.type === "operator") {
             if(input.value === "*") {
                 return input; //Placeholder
             }
+        } else if(input.type === "unaryOperator") {
+            return input;
         } else if (input.type === "call" && "value" in input) {
             const openParen = input.value.indexOf("(");
             const name = input.value.slice(0, openParen);
@@ -134,6 +146,23 @@ function parseSubExpression(input: NestedTokenArray | Expression): ParsedSubExpr
         // Unwrap a group containing just one parsed item, such as [B].
         if (parsedParts.length === 1) {
             return parsedParts[0];
+        }
+
+        // Unary minus applies to the following expression, e.g. -B or --B.
+        let firstOperand = 0;
+        while (
+            firstOperand < parsedParts.length &&
+            !Array.isArray(parsedParts[firstOperand]) &&
+            parsedParts[firstOperand].type === "unaryOperator"
+        ) {
+            firstOperand++;
+        }
+        if (firstOperand > 0 && firstOperand === parsedParts.length - 1 && isExpression(parsedParts[firstOperand])) {
+            let result = parsedParts[firstOperand];
+            for (let i = 0; i < firstOperand; i++) {
+                result = { type: "negate", operand: result };
+            }
+            return result;
         }
 
         // Combine alternating operand/operator groups from left to right.
@@ -193,6 +222,7 @@ function isExpression(value: ParsedSubExpression): value is Expression {
         case "lessThanOrEqual": return "left" in value && "right" in value;
         case "add": return "left" in value && "right" in value;
         case "subtract": return "left" in value && "right" in value;
+        case "negate": return "operand" in value;
         case "lessThan": return "left" in value && "right" in value;
         case "greaterThan": return "left" in value && "right" in value;
         case "greaterThanOrEqual": return "left" in value && "right" in value;
@@ -211,7 +241,7 @@ export function splitTokensByLevel3Operations(tokens: NestedTokenArray): NestedT
         let group: Token[] = [];
 
         for (const token of tokenGroup) {
-            if (operationLevel[token.value] === 3) {
+            if (token.type === "operator" && operationLevel[token.value] === 3) {
                 final.push(group);
                 group = [];
                 final.push([token]);
@@ -238,7 +268,7 @@ export function splitTokensByLevel2Operations(tokens: (Token[] | Token)[]): Nest
         const row: NestedTokenArray[] = [];
         let group: Token[] = [];
         for (const token of part) {
-            if (operationLevel[token.value] === 2) {
+            if (token.type === "operator" && operationLevel[token.value] === 2) {
                 row.push(group, [token]);
                 group = [];
             } else {
@@ -256,7 +286,7 @@ export function splitTokensByLevel1Operations(tokens: Token[]): (Token[] | Token
     let level1OperationCount = 0;
     let level1OperationIndex = 0;
     for(let i = 0; i < tokens.length; i++){
-        if(operationLevel[tokens[i].value] && operationLevel[tokens[i].value] == 1){
+        if(tokens[i].type === "operator" && operationLevel[tokens[i].value] === 1){
             level1OperationCount++;
             level1OperationIndex = i;
         }
@@ -272,40 +302,58 @@ export function splitTokensByLevel1Operations(tokens: Token[]): (Token[] | Token
 
 }
 
+function readDelimitedTokens(
+    tokens: Token[],
+    openIndex: number,
+    opening: string,
+    closing: string
+): { text: string; closeIndex: number } {
+    let depth = 0;
+    let text = "";
+
+    for (let i = openIndex; i < tokens.length; i++) {
+        const value = tokens[i].value;
+        text += value;
+        if (value === opening) depth++;
+        if (value === closing && --depth === 0) {
+            return { text, closeIndex: i };
+        }
+    }
+
+    throw new Error(`Missing closing delimiter "${closing}"`);
+}
+
 export function combineFunctionOperationsFromTokenize(tokens: Token[]): Token[]{
     let combinedTokens: Token[] = [];
     let currentIndex = 0;
     for(let i = 0; i < tokens.length; i++){
-        if(tokens[i].type === "identifier" && tokens[i+1]?.value === "("){
-            // Combine a function name and its parenthesized argument.
-            if(combinedTokens[currentIndex] && combinedTokens[currentIndex].type === "call"){
-                combinedTokens[currentIndex].value += tokens[i].value;
-            }
-            else {
-                combinedTokens[currentIndex] = {
-                    type: "call",
-                    value: tokens[i].value
-                }
-            }
+        const previous = tokens[i - 1];
+        const isUnaryMinus = tokens[i].value === "-" && (
+            i === 0 ||
+            previous?.type === "operator" ||
+            previous?.type === "unaryOperator" ||
+            (previous?.type === "punctuation" && "([,".includes(previous.value))
+        );
 
-            i++;
-            while(tokens[i].value != ")"){
-                combinedTokens[currentIndex].value += tokens[i].value;
-                i++;
-            }
-
-
-            combinedTokens[currentIndex].value += tokens[i].value;
+        if (isUnaryMinus) {
+            combinedTokens[currentIndex] = { type: "unaryOperator", value: "-" };
+            currentIndex++;
+        } else if(tokens[i].type === "identifier" && tokens[i+1]?.value === "("){
+            const call = readDelimitedTokens(tokens, i + 1, "(", ")");
+            combinedTokens[currentIndex] = {
+                type: "call",
+                value: tokens[i].value + call.text
+            };
+            i = call.closeIndex;
             currentIndex++;
 
         } else if(tokens[i].type === "identifier" && tokens[i+1]?.value === "["){
-            let value = tokens[i].value + tokens[i + 1].value;
-            i += 2;
-            while(tokens[i].value !== "]"){
-                value += tokens[i].value;
-                i++;
+            let value = tokens[i].value;
+            while (tokens[i + 1]?.value === "[") {
+                const index = readDelimitedTokens(tokens, i + 1, "[", "]");
+                value += index.text;
+                i = index.closeIndex;
             }
-            value += tokens[i].value;
             combinedTokens[currentIndex] = { type: "indexToken", value };
             currentIndex++;
 
